@@ -280,6 +280,7 @@ export async function fetchVideoDetails(refs: VideoRef[], userId: string): Promi
         isLive: item.snippet.liveBroadcastContent === 'live',
         // Fallback path only: approximate by length against the Shorts ceiling.
         kind: known ?? (durationSec > 0 && durationSec <= SHORTS_MAX_SEC ? 'short' : 'long'),
+        fetchedAt: Date.now(),
       }
     }),
   )
@@ -288,9 +289,14 @@ export async function fetchVideoDetails(refs: VideoRef[], userId: string): Promi
 export interface RefreshProgress {
   scanned: number
   channels: number
+  /** Newly indexed videos delivered so far. */
   videos: number
-  /** Discovered videos still queued behind the pacing budget. */
+  /** Cached videos whose details were re-read and updated in place. */
+  updated: number
+  /** Newly discovered videos still queued behind the pacing budget. */
   queued: number
+  /** Cached videos still queued for a details refresh. */
+  queuedStale: number
 }
 
 export interface FeedResult {
@@ -311,20 +317,28 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
  *
  * Channel scanning and video-detail fetching run as a producer/consumer pair,
  * each drawing on its own half of the budget. When scanning finishes, the
- * video side is handed the full allowance. Videos already in `knownIds` are
- * never requested and never consume budget.
+ * video side is handed the full allowance.
+ *
+ * Discovered videos are routed into two queues. Anything not in `knownIds` is
+ * new and fetched first, so fresh uploads reach the grid quickly. Anything in
+ * `staleIds` is already cached but its details have aged out, so it is re-read
+ * afterwards to update the title, view count, and thumbnail in place. Cached
+ * videos that are neither are skipped entirely and cost no budget.
  */
 export async function fetchFeed(
   channels: Channel[],
   userId: string,
   knownIds: Set<string>,
+  staleIds: Set<string>,
   includeShorts: boolean,
   onProgress: (p: RefreshProgress) => void,
   onVideos: (videos: Video[]) => void,
 ): Promise<FeedResult> {
   const failed: { title: string; message: string }[] = []
-  const seen = new Set(knownIds)
+  // Within-run dedupe only: the same video can appear in two channel scans.
+  const seen = new Set<string>()
   const pending: VideoRef[] = []
+  const stale: VideoRef[] = []
 
   const channelPacer = new Pacer(CHANNEL_ITEMS_PER_SEC, 5, 5)
   // Seed a full batch so the first videos appear immediately; the average
@@ -333,18 +347,22 @@ export async function fetchFeed(
 
   let scanned = 0
   let delivered = 0
+  let updated = 0
   let scanningDone = false
-  // Refs pulled off `pending` but still waiting on the pacer or in flight.
+  // Refs pulled off a queue but still waiting on the pacer or in flight.
   // Without this they would count as neither queued nor delivered, and the
   // reported total would visibly dip while a batch waits for budget.
-  let inFlight = 0
+  let inFlightNew = 0
+  let inFlightStale = 0
 
   const report = () =>
     onProgress({
       scanned,
       channels: channels.length,
       videos: delivered,
-      queued: pending.length + inFlight,
+      updated,
+      queued: pending.length + inFlightNew,
+      queuedStale: stale.length + inFlightStale,
     })
 
   const produce = pool(channels, CHANNEL_SCAN_CONCURRENCY, async (channel) => {
@@ -353,7 +371,8 @@ export async function fetchFeed(
       for (const ref of await fetchChannelRefs(channel.id, includeShorts)) {
         if (seen.has(ref.id)) continue
         seen.add(ref.id)
-        pending.push(ref)
+        if (!knownIds.has(ref.id)) pending.push(ref)
+        else if (staleIds.has(ref.id)) stale.push(ref)
       }
     } catch (err) {
       failed.push({ title: channel.title, message: err instanceof Error ? err.message : String(err) })
@@ -364,18 +383,24 @@ export async function fetchFeed(
 
   const consume = async () => {
     for (;;) {
-      if (pending.length === 0) {
-        if (scanningDone) return
+      // New videos always win. Re-reading cached rows waits until discovery is
+      // finished and nothing new is left, so a refresh never delays fresh
+      // uploads to update numbers on videos the user has already seen.
+      const isNew = pending.length > 0
+      if (!isNew && (!scanningDone || stale.length === 0)) {
+        if (scanningDone && stale.length === 0) return
         await sleep(100)
         continue
       }
-      const batch = pending.splice(0, DETAIL_CHUNK)
-      inFlight += batch.length
+      const batch = (isNew ? pending : stale).splice(0, DETAIL_CHUNK)
+      if (isNew) inFlightNew += batch.length
+      else inFlightStale += batch.length
       report()
       await videoPacer.take(batch.length)
       try {
         const videos = await fetchVideoDetails(batch, userId)
-        delivered += videos.length
+        if (isNew) delivered += videos.length
+        else updated += videos.length
         onVideos(videos)
       } catch (err) {
         failed.push({
@@ -383,7 +408,8 @@ export async function fetchFeed(
           message: err instanceof Error ? err.message : String(err),
         })
       } finally {
-        inFlight -= batch.length
+        if (isNew) inFlightNew -= batch.length
+        else inFlightStale -= batch.length
       }
       report()
     }

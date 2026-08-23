@@ -22,6 +22,13 @@ export function applyRules(videos: Video[], rules: FeedRules): Video[] {
   const needle = rules.query.trim().toLowerCase()
   const minSec = rules.minMinutes * 60
   const maxSec = rules.maxMinutes > 0 ? rules.maxMinutes * 60 : Infinity
+  // Both ends are inclusive whole days in the viewer's own timezone, which is
+  // the calendar the date picker showed them.
+  const from = rules.fromDate ? new Date(`${rules.fromDate}T00:00:00`).getTime() : -Infinity
+  const to = rules.toDate ? new Date(`${rules.toDate}T23:59:59.999`).getTime() : Infinity
+  // Parsing a date per video is not free, and this list is re-filtered on
+  // every keystroke, so skip it entirely when no window is set.
+  const windowed = from > -Infinity || to < Infinity
 
   const filtered = videos.filter((v) => {
     if (muted.has(v.channelId)) return false
@@ -30,6 +37,10 @@ export function applyRules(videos: Video[], rules: FeedRules): Video[] {
     if (rules.hideShorts && v.kind === 'short') return false
     // Live streams report a zero duration; length filters cannot apply to them.
     if (v.durationSec > 0 && (v.durationSec < minSec || v.durationSec > maxSec)) return false
+    if (windowed) {
+      const published = new Date(v.publishedAt).getTime()
+      if (published < from || published > to) return false
+    }
     if (needle && !v.title.toLowerCase().includes(needle) && !v.channelTitle.toLowerCase().includes(needle)) {
       return false
     }

@@ -30,6 +30,11 @@ export interface Video {
   commentCount: number
   isLive: boolean
   kind: VideoKind
+  /**
+   * When this row's details were last read from the API. Absent on rows cached
+   * before metadata refreshing existed, which makes them refresh first.
+   */
+  fetchedAt?: number
 }
 
 export type SortKey =
@@ -45,6 +50,9 @@ export interface FeedRules {
   hideShorts: boolean
   minMinutes: number
   maxMinutes: number // 0 = no upper bound
+  /** Release-date window as `YYYY-MM-DD`; '' means unbounded on that end. */
+  fromDate: string
+  toDate: string
   query: string
   mutedChannels: string[]
 }
@@ -54,12 +62,29 @@ export const DEFAULT_RULES: FeedRules = {
   hideShorts: true,
   minMinutes: 0,
   maxMinutes: 0,
+  fromDate: '',
+  toDate: '',
   query: '',
   mutedChannels: [],
 }
 
 /** Videos read per playlist per channel on a refresh (50 per API call). */
 export const PAGES_PER_PLAYLIST = 2
+
+/**
+ * How old a cached video's details may be before a refresh re-reads them.
+ * Titles rarely change but view counts drive the trending sort, so a daily
+ * refresh should pick up new numbers without re-reading the same rows twice
+ * in one sitting.
+ */
+export const METADATA_TTL_MS = 6 * 3600_000
+
+/**
+ * Videos published longer ago than this are never re-read. Their view counts
+ * have long since flattened, and re-reading a whole back catalogue on every
+ * refresh would swallow the pacing budget that new uploads need.
+ */
+export const METADATA_REFRESH_MAX_AGE_MS = 7 * 24 * 3600_000
 
 /**
  * Indexing budget. Channels and videos each get half while channels remain to

@@ -20,14 +20,10 @@ export function setLastUserId(userId: string): void {
   localStorage.setItem(LAST_USER_KEY, userId)
 }
 
-/** Cap on cached videos, newest kept, to bound IndexedDB growth. */
-const MAX_CACHED_VIDEOS = 4000
-
 export interface FeedCache {
   userId: string
   channels: Channel[]
   videos: Video[]
-  subsFetchedAt: number
   feedFetchedAt: number
 }
 
@@ -64,17 +60,34 @@ export async function clearCache(userId: string): Promise<void> {
   await idbDel(cacheKey(userId))
 }
 
-/** Keep the newest videos only, so the cache cannot grow without bound. */
-export function pruneVideos(videos: Video[]): Video[] {
-  if (videos.length <= MAX_CACHED_VIDEOS) return videos
-  return [...videos]
-    .sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime())
-    .slice(0, MAX_CACHED_VIDEOS)
+/**
+ * The rows of a cache record that belong to `userId`. Records are keyed per
+ * account, so in normal use this filters nothing; it is a guard against a
+ * record left by an account-blind build showing one account's feed to another.
+ */
+export function rowsForUser<T extends { userId: string }>(rows: T[], userId: string): T[] {
+  return rows.filter((r) => r.userId === userId)
 }
 
-/** Last-write-wins merge of freshly fetched videos over the cached set. */
+/**
+ * Merge freshly fetched videos over the cached set: rows the API returned again
+ * are updated in place, rows it did not mention are kept untouched. A refresh
+ * only ever adds to the cache, so history already indexed is never re-fetched
+ * and never lost — earlier versions capped the cache and silently dropped the
+ * oldest rows on every refresh.
+ */
 export function mergeVideos(cached: Video[], fresh: Video[]): Video[] {
   const byId = new Map(cached.map((v) => [v.id, v]))
   for (const v of fresh) byId.set(v.id, v)
+  return [...byId.values()]
+}
+
+/**
+ * Same last-write-wins merge for channels. Unsubscribing must not delete the
+ * channel row, or every cached video from it loses its avatar.
+ */
+export function mergeChannels(cached: Channel[], fresh: Channel[]): Channel[] {
+  const byId = new Map(cached.map((c) => [c.id, c]))
+  for (const c of fresh) byId.set(c.id, c)
   return [...byId.values()]
 }
