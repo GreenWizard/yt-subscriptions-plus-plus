@@ -1,4 +1,4 @@
-# YouTube Decomposer
+# yt-subscriptions++
 
 Your YouTube subscription feed, on your rules. No algorithm, no Shorts, and sorting that goes
 beyond "newest".

@@ -2,7 +2,7 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "youtube-decomposer",
+      "name": "yt-subscriptions-plus-plus",
       "runtimeExecutable": "npm",
       "runtimeArgs": [
         "run",

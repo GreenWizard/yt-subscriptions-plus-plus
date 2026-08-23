@@ -238,7 +238,7 @@ export default function App() {
       <div className="head">
         <header className="topbar">
         <div className="brand">
-          YouTube <span>Decomposer</span>
+          yt-subscriptions<span>++</span>
         </div>
         <div className="spacer" />
         {videos.length > 0 && (
