@@ -1,7 +1,11 @@
 import { getAccessToken, invalidateToken } from './auth'
-import type { Channel, Video } from './types'
+import { PAGES_PER_PLAYLIST, type Channel, type Video, type VideoKind } from './types'
 
 const API = 'https://www.googleapis.com/youtube/v3'
+const DETAIL_CHUNK = 50
+
+/** Shorts may run up to 3 minutes (raised from 60s in October 2024). */
+const SHORTS_MAX_SEC = 180
 
 export class YouTubeError extends Error {
   constructor(
@@ -96,52 +100,92 @@ export async function fetchSubscriptions(onProgress?: (count: number) => void): 
 }
 
 /**
- * A channel's uploads playlist ID is its channel ID with the `UC` prefix
- * swapped for `UU`, so we can skip a channels.list round trip entirely.
+ * YouTube auto-generates per-channel playlists whose IDs are the channel ID
+ * with `UC` swapped for a type prefix. `UU` is everything; it decomposes into
+ * long-form, Shorts, and live. Reading the parts separately keeps Shorts from
+ * consuming the page budget and starving older long-form uploads, which is
+ * what limited history to roughly a week when reading `UU` alone.
  */
-function uploadsPlaylistId(channelId: string): string {
-  return channelId.startsWith('UC') ? `UU${channelId.slice(2)}` : channelId
+const PLAYLIST_PREFIX: Record<VideoKind, string> = {
+  long: 'UULF',
+  live: 'UULV',
+  short: 'UUSH',
+}
+
+function playlistId(channelId: string, prefix: string): string {
+  return prefix + channelId.slice(2)
 }
 
 interface PlaylistItem {
   contentDetails: { videoId: string; videoPublishedAt?: string }
 }
 
-/** Recent upload IDs for one channel, newest first, stopping once we pass `since`. */
-async function fetchRecentUploadIds(channelId: string, since: Date, maxPages = 2): Promise<string[]> {
+export interface VideoRef {
+  id: string
+  /** null when read from the combined UU fallback; resolved from duration. */
+  kind: VideoKind | null
+}
+
+/** Read up to `maxPages` pages of video IDs from one playlist, newest first. */
+async function fetchPlaylistIds(id: string, maxPages: number): Promise<string[]> {
   const ids: string[] = []
   let pageToken: string | undefined
 
   for (let page = 0; page < maxPages; page++) {
-    let res: ListResponse<PlaylistItem>
-    try {
-      res = await apiGet('playlistItems', {
-        part: 'contentDetails',
-        playlistId: uploadsPlaylistId(channelId),
-        maxResults: '50',
-        ...(pageToken ? { pageToken } : {}),
-      })
-    } catch (err) {
-      // A channel with no public uploads 404s; that is not a failure of the run.
-      if (err instanceof YouTubeError && err.status === 404) return ids
-      throw err
-    }
-
-    let reachedOlder = false
-    for (const item of res.items ?? []) {
-      const published = item.contentDetails.videoPublishedAt
-      if (published && new Date(published) < since) {
-        reachedOlder = true
-        continue
-      }
-      ids.push(item.contentDetails.videoId)
-    }
-
-    if (reachedOlder || !res.nextPageToken) break
+    const res: ListResponse<PlaylistItem> = await apiGet('playlistItems', {
+      part: 'contentDetails',
+      playlistId: id,
+      maxResults: '50',
+      ...(pageToken ? { pageToken } : {}),
+    })
+    for (const item of res.items ?? []) ids.push(item.contentDetails.videoId)
+    if (!res.nextPageToken) break
     pageToken = res.nextPageToken
   }
 
   return ids
+}
+
+/**
+ * Video refs for one channel. The split playlists are undocumented, so a 404
+ * on the long-form list falls back to the combined `UU` uploads playlist.
+ */
+async function fetchChannelRefs(channelId: string, includeShorts: boolean): Promise<VideoRef[]> {
+  if (!channelId.startsWith('UC')) {
+    const ids = await fetchPlaylistIds(channelId, PAGES_PER_PLAYLIST)
+    return ids.map((id) => ({ id, kind: null }))
+  }
+
+  const kinds: VideoKind[] = includeShorts ? ['long', 'live', 'short'] : ['long', 'live']
+
+  const perKind = await Promise.all(
+    kinds.map(async (kind) => {
+      try {
+        const ids = await fetchPlaylistIds(
+          playlistId(channelId, PLAYLIST_PREFIX[kind]),
+          PAGES_PER_PLAYLIST,
+        )
+        return ids.map((id): VideoRef => ({ id, kind }))
+      } catch (err) {
+        // A channel with no videos of this kind simply has no such playlist.
+        if (err instanceof YouTubeError && err.status === 404) return null
+        throw err
+      }
+    }),
+  )
+
+  // Every split playlist missing means the prefixes did not apply here.
+  if (perKind.every((r) => r === null)) {
+    const ids = await fetchPlaylistIds(playlistId(channelId, 'UU'), PAGES_PER_PLAYLIST).catch(
+      (err) => {
+        if (err instanceof YouTubeError && err.status === 404) return [] as string[]
+        throw err
+      },
+    )
+    return ids.map((id) => ({ id, kind: null }))
+  }
+
+  return perKind.filter((r): r is VideoRef[] => r !== null).flat()
 }
 
 interface VideoItem {
@@ -167,21 +211,26 @@ export function parseDuration(iso: string): number {
   return (+(d ?? 0) * 86400) + (+(h ?? 0) * 3600) + (+(min ?? 0) * 60) + +(s ?? 0)
 }
 
-export async function fetchVideoDetails(ids: string[]): Promise<Video[]> {
+export async function fetchVideoDetails(refs: VideoRef[]): Promise<Video[]> {
+  const kindById = new Map(refs.map((r) => [r.id, r.kind]))
+  const ids = refs.map((r) => r.id)
+
   const chunks: string[][] = []
-  for (let i = 0; i < ids.length; i += 50) chunks.push(ids.slice(i, i + 50))
+  for (let i = 0; i < ids.length; i += DETAIL_CHUNK) chunks.push(ids.slice(i, i + DETAIL_CHUNK))
 
   const pages = await pool(chunks, 4, (chunk) =>
     apiGet<ListResponse<VideoItem>>('videos', {
       part: 'snippet,contentDetails,statistics',
       id: chunk.join(','),
-      maxResults: '50',
+      maxResults: String(DETAIL_CHUNK),
     }),
   )
 
   return pages.flatMap((page) =>
     (page.items ?? []).map((item): Video => {
       const t = item.snippet.thumbnails
+      const durationSec = parseDuration(item.contentDetails.duration)
+      const known = kindById.get(item.id) ?? null
       return {
         id: item.id,
         channelId: item.snippet.channelId,
@@ -190,47 +239,78 @@ export async function fetchVideoDetails(ids: string[]): Promise<Video[]> {
         description: item.snippet.description ?? '',
         thumbnail: t?.medium?.url ?? t?.high?.url ?? t?.default?.url ?? '',
         publishedAt: item.snippet.publishedAt,
-        durationSec: parseDuration(item.contentDetails.duration),
+        durationSec,
         viewCount: Number(item.statistics?.viewCount ?? 0),
         likeCount: Number(item.statistics?.likeCount ?? 0),
         commentCount: Number(item.statistics?.commentCount ?? 0),
         isLive: item.snippet.liveBroadcastContent === 'live',
+        // Fallback path only: approximate by length against the Shorts ceiling.
+        kind: known ?? (durationSec > 0 && durationSec <= SHORTS_MAX_SEC ? 'short' : 'long'),
       }
     }),
   )
 }
 
 export interface RefreshProgress {
-  stage: 'subs' | 'uploads' | 'details' | 'done'
-  done: number
-  total: number
+  scanned: number
+  channels: number
+  videos: number
+}
+
+export interface FeedResult {
+  /** Channels whose scan failed; their videos are missing from this refresh. */
+  failed: { title: string; message: string }[]
 }
 
 /**
- * Collect every upload from `channels` published within the lookback window.
- * `knownIds` are videos already cached, so we only pay for details we lack.
+ * Scan every channel and stream video details back through `onVideos` as each
+ * batch resolves, so the feed fills in progressively instead of appearing only
+ * once the whole refresh completes.
  */
 export async function fetchFeed(
   channels: Channel[],
-  lookbackDays: number,
   knownIds: Set<string>,
+  includeShorts: boolean,
   onProgress: (p: RefreshProgress) => void,
-): Promise<{ videos: Video[]; allIds: string[] }> {
-  const since = new Date(Date.now() - lookbackDays * 86400_000)
+  onVideos: (videos: Video[]) => void,
+): Promise<FeedResult> {
+  const failed: { title: string; message: string }[] = []
+  const seen = new Set(knownIds)
+  const pending: VideoRef[] = []
+  const inflight: Promise<void>[] = []
+  let scanned = 0
+  let delivered = 0
 
-  let done = 0
-  const perChannel = await pool(channels, 6, async (channel) => {
-    const ids = await fetchRecentUploadIds(channel.id, since).catch(() => [] as string[])
-    onProgress({ stage: 'uploads', done: ++done, total: channels.length })
-    return ids
+  const flush = (force: boolean) => {
+    while (pending.length >= DETAIL_CHUNK || (force && pending.length > 0)) {
+      const batch = pending.splice(0, DETAIL_CHUNK)
+      inflight.push(
+        fetchVideoDetails(batch).then((videos) => {
+          delivered += videos.length
+          onVideos(videos)
+          onProgress({ scanned, channels: channels.length, videos: delivered })
+        }),
+      )
+    }
+  }
+
+  await pool(channels, 6, async (channel) => {
+    try {
+      for (const ref of await fetchChannelRefs(channel.id, includeShorts)) {
+        if (seen.has(ref.id)) continue
+        seen.add(ref.id)
+        pending.push(ref)
+      }
+    } catch (err) {
+      failed.push({ title: channel.title, message: err instanceof Error ? err.message : String(err) })
+    }
+    scanned++
+    onProgress({ scanned, channels: channels.length, videos: delivered })
+    flush(false)
   })
 
-  const allIds = [...new Set(perChannel.flat())]
-  const missing = allIds.filter((id) => !knownIds.has(id))
+  flush(true)
+  await Promise.all(inflight)
 
-  onProgress({ stage: 'details', done: 0, total: missing.length })
-  const videos = missing.length ? await fetchVideoDetails(missing) : []
-  onProgress({ stage: 'done', done: missing.length, total: missing.length })
-
-  return { videos, allIds }
+  return { failed }
 }

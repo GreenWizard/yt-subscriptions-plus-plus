@@ -20,9 +20,10 @@ never leave your machine.
 
 **Filtering**
 
-- **Hide Shorts** — drops anything 60 seconds or under.
+- **Hide Shorts** — excludes Shorts by their source playlist rather than by length.
+  Shorts can run up to 3 minutes, so a duration cutoff both misses long Shorts and
+  hides legitimately short videos.
 - **Length window** — min/max minutes (leave max at 0 for no upper bound).
-- **Lookback** — how many days back the feed reaches, 1–90.
 - **Search** — substring match on video title or channel name.
 
 Rules persist in `localStorage`, so the feed opens the way you left it.
@@ -68,14 +69,13 @@ Click **Sign in with Google**. Sign-in uses a popup, so allow popups for `localh
 
 Google gives each project 10,000 quota units per day, resetting at midnight Pacific.
 
-A full refresh costs roughly `1 + N` units for `N` subscribed channels — about 300 units at 300
-subscriptions, so ~30 full refreshes a day. The app keeps that low by:
+A full refresh costs roughly `2N` units for `N` subscribed channels — about 600 units at 300
+subscriptions, so ~16 full refreshes a day. The app keeps that low by:
 
-- deriving each channel's uploads playlist ID from its channel ID (`UC…` → `UU…`) instead of
-  spending a `channels.list` call per channel;
-- reading only video IDs and publish dates while scanning channels, then fetching full details for
-  videos it has not already cached;
-- stopping pagination as soon as a channel's uploads fall outside the lookback window;
+- deriving playlist IDs from the channel ID instead of spending a `channels.list` call per
+  channel;
+- reading only video IDs while scanning channels, then fetching full details for videos it has
+  not already cached;
 - caching subscriptions for 12 hours and video metadata in IndexedDB.
 
 Refreshes after the first are much cheaper, since only genuinely new videos need details fetched.
@@ -126,10 +126,15 @@ static host. Add the deployed origin to **Authorized JavaScript origins** under
   without a prompt while you are still signed in.
 - Live streams report a zero duration and are exempt from the length filters, so they never get
   filtered out for being "too short".
-- Channel scanning reads at most two pages (100 videos) per channel per refresh, which bounds cost
-  on very prolific channels.
-- The lookback window filters the cached feed, but widening it past what has already been fetched
-  needs a **Refresh** to pull the older videos in.
+- Channel scanning reads at most two pages (100 videos) *per playlist* per channel per refresh,
+  which bounds cost on very prolific channels.
+- YouTube's `UU` uploads playlist is the union of `UULF` (long-form), `UUSH` (Shorts), and `UULV`
+  (live). The app reads those parts separately, so Shorts never consume the page budget and starve
+  older long-form uploads. These prefixes are undocumented, so a channel where they do not resolve
+  falls back to `UU`, with Shorts approximated by the 3-minute ceiling.
+- Turning **Hide Shorts** off only reveals Shorts fetched by a later refresh; Shorts are not
+  downloaded while the rule is on.
+- Channels whose scan fails are reported in the status bar rather than silently omitted.
 - Only accounts on the **Test users** list can sign in; everyone else is refused with
   `access_denied`. To let another account in, add it to that list. Publishing the app instead would
   trigger Google verification, since `youtube.readonly` is a sensitive scope, and an unverified

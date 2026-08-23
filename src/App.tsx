@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Controls } from './components/Controls'
 import { Setup } from './components/Setup'
 import { VideoCard } from './components/VideoCard'
@@ -12,27 +12,35 @@ import {
   pruneVideos,
   saveCache,
   saveRules,
-  type FeedCache,
 } from './lib/store'
-import type { FeedRules } from './lib/types'
-import { fetchFeed, fetchSubscriptions, type RefreshProgress } from './lib/youtube'
+import type { Channel, FeedRules, Video } from './lib/types'
+import { fetchFeed, fetchSubscriptions } from './lib/youtube'
 
 const SUBS_TTL_MS = 12 * 3600_000
 
 export default function App() {
   const [configured, setConfigured] = useState(() => Boolean(getClientId()))
   const [signedIn, setSignedIn] = useState(false)
-  const [cache, setCache] = useState<FeedCache | null>(null)
+  const [channels, setChannels] = useState<Channel[]>([])
+  const [videos, setVideos] = useState<Video[]>([])
+  const [loaded, setLoaded] = useState(false)
   const [rules, setRules] = useState<FeedRules>(loadRules)
   const [busy, setBusy] = useState(false)
-  const [progress, setProgress] = useState<string>('')
-  const [error, setError] = useState<string>('')
+  const [progress, setProgress] = useState('')
+  const [error, setError] = useState('')
+  const [failed, setFailed] = useState<{ title: string; message: string }[]>([])
 
   // Restore the cached feed, and the session only if a token is already held.
   // Authorization is never attempted on mount: the GIS token client always
   // opens a popup, and a popup not tied to a user gesture gets blocked.
   useEffect(() => {
-    void loadCache().then((c) => c && setCache(c))
+    void loadCache().then((c) => {
+      if (c) {
+        setChannels(c.channels)
+        setVideos(c.videos)
+      }
+      setLoaded(true)
+    })
     setSignedIn(configured && hasValidToken())
   }, [configured])
 
@@ -42,63 +50,69 @@ export default function App() {
     setRules((prev) => ({ ...prev, ...patch }))
   }, [])
 
-  const refresh = useCallback(
-    async (force = false) => {
-      setBusy(true)
-      setError('')
-      try {
-        await getAccessToken(false).catch(() => getAccessToken(true))
-        setSignedIn(true)
+  const hideShorts = rules.hideShorts
+  // Read inside refresh without making it a dependency, so a rule edit mid-run
+  // cannot rebuild the callback underneath an in-flight refresh.
+  const hideShortsRef = useRef(hideShorts)
+  hideShortsRef.current = hideShorts
 
-        const current = (await loadCache()) ?? null
-        const subsStale = !current || Date.now() - current.subsFetchedAt > SUBS_TTL_MS
-        let channels = current?.channels ?? []
+  const refresh = useCallback(async (force = false) => {
+    setBusy(true)
+    setError('')
+    setFailed([])
+    try {
+      await getAccessToken(false).catch(() => getAccessToken(true))
+      setSignedIn(true)
 
-        if (force || subsStale || channels.length === 0) {
-          setProgress('Loading subscriptions…')
-          channels = await fetchSubscriptions((n) => setProgress(`Loading subscriptions… ${n}`))
-        }
+      const current = await loadCache()
+      const subsStale = !current || Date.now() - current.subsFetchedAt > SUBS_TTL_MS
+      let subs = current?.channels ?? []
 
-        const known = new Set((current?.videos ?? []).map((v) => v.id))
-        const describe = (p: RefreshProgress) =>
-          p.stage === 'uploads'
-            ? `Scanning channels… ${p.done}/${p.total}`
-            : p.stage === 'details'
-              ? `Fetching ${p.total} new videos…`
-              : 'Finishing up…'
-
-        const { videos } = await fetchFeed(channels, rules.lookbackDays, known, (p) =>
-          setProgress(describe(p)),
-        )
-
-        const merged = pruneVideos(
-          mergeVideos(current?.videos ?? [], videos),
-          Math.max(rules.lookbackDays, 30),
-        )
-        const next: FeedCache = {
-          channels,
-          videos: merged,
-          subsFetchedAt: subsStale || force ? Date.now() : (current?.subsFetchedAt ?? Date.now()),
-          feedFetchedAt: Date.now(),
-        }
-        await saveCache(next)
-        setCache(next)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err))
-      } finally {
-        setBusy(false)
-        setProgress('')
+      if (force || subsStale || subs.length === 0) {
+        setProgress('Loading subscriptions…')
+        subs = await fetchSubscriptions((n) => setProgress(`Loading subscriptions… ${n}`))
+        setChannels(subs)
       }
-    },
-    [rules.lookbackDays],
-  )
 
-  const channelsById = useMemo(
-    () => new Map((cache?.channels ?? []).map((c) => [c.id, c])),
-    [cache],
-  )
+      // Accumulate outside React state so streamed batches cannot race.
+      const collected: Video[] = []
+      const known = new Set((current?.videos ?? []).map((v) => v.id))
 
-  const visible = useMemo(() => applyRules(cache?.videos ?? [], rules), [cache, rules])
+      const result = await fetchFeed(
+        subs,
+        known,
+        !hideShortsRef.current,
+        (p) =>
+          setProgress(
+            `Scanning ${p.scanned}/${p.channels} channels${p.videos ? ` · ${p.videos} new videos` : ''}…`,
+          ),
+        (batch) => {
+          collected.push(...batch)
+          // Show each batch immediately rather than waiting for the whole run.
+          setVideos((prev) => mergeVideos(prev, batch))
+        },
+      )
+
+      const merged = pruneVideos(mergeVideos(current?.videos ?? [], collected))
+      setVideos(merged)
+      setChannels(subs)
+      setFailed(result.failed)
+      await saveCache({
+        channels: subs,
+        videos: merged,
+        subsFetchedAt: subsStale || force ? Date.now() : (current?.subsFetchedAt ?? Date.now()),
+        feedFetchedAt: Date.now(),
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+      setProgress('')
+    }
+  }, [])
+
+  const channelsById = useMemo(() => new Map(channels.map((c) => [c.id, c])), [channels])
+  const visible = useMemo(() => applyRules(videos, rules), [videos, rules])
 
   if (!configured) return <Setup onReady={() => setConfigured(true)} />
 
@@ -109,9 +123,9 @@ export default function App() {
           YouTube <span>Decomposer</span>
         </div>
         <div className="spacer" />
-        {cache && (
+        {videos.length > 0 && (
           <span className="control">
-            {visible.length} of {cache.videos.length} · {cache.channels.length} channels
+            {visible.length} of {videos.length} · {channels.length} channels
           </span>
         )}
         {signedIn ? (
@@ -138,14 +152,26 @@ export default function App() {
 
       <Controls rules={rules} onChange={updateRules} />
 
-      {(progress || error) && (
+      {(progress || error || failed.length > 0) && (
         <div className="status">
           {progress && <span>{progress}</span>}
           {error && <span className="error">{error}</span>}
+          {failed.length > 0 && (
+            <span
+              className="error"
+              title={failed.map((f) => `${f.title}: ${f.message}`).join('\n')}
+            >
+              {failed.length} channel{failed.length > 1 ? 's' : ''} failed to load (hover for
+              details)
+            </span>
+          )}
           {error && (
             <button
               onClick={() => {
-                void clearCache().then(() => setCache(null))
+                void clearCache().then(() => {
+                  setVideos([])
+                  setChannels([])
+                })
                 setError('')
               }}
             >
@@ -170,9 +196,11 @@ export default function App() {
         <div className="empty">
           {busy
             ? 'Building your feed…'
-            : cache
-              ? 'No videos match your current rules. Try widening the length range or the lookback window.'
-              : 'Sign in to pull your subscriptions and build the feed.'}
+            : !loaded
+              ? ''
+              : videos.length > 0
+                ? 'No videos match your current rules. Try widening the length range.'
+                : 'Sign in to pull your subscriptions and build the feed.'}
         </div>
       )}
     </>

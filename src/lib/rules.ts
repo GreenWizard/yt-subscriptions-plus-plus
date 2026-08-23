@@ -9,8 +9,6 @@ export const SORT_LABELS: Record<SortKey, string> = {
   shortest: 'Shortest first',
 }
 
-const SHORTS_MAX_SEC = 60
-
 export function ageHours(video: Video): number {
   return Math.max(1, (Date.now() - new Date(video.publishedAt).getTime()) / 3_600_000)
 }
@@ -20,16 +18,16 @@ export function viewsPerHour(video: Video): number {
 }
 
 export function applyRules(videos: Video[], rules: FeedRules): Video[] {
-  const cutoff = Date.now() - rules.lookbackDays * 86400_000
   const muted = new Set(rules.mutedChannels)
   const needle = rules.query.trim().toLowerCase()
   const minSec = rules.minMinutes * 60
   const maxSec = rules.maxMinutes > 0 ? rules.maxMinutes * 60 : Infinity
 
   const filtered = videos.filter((v) => {
-    if (new Date(v.publishedAt).getTime() < cutoff) return false
     if (muted.has(v.channelId)) return false
-    if (rules.hideShorts && v.durationSec > 0 && v.durationSec <= SHORTS_MAX_SEC) return false
+    // Shorts are identified by their source playlist, not by length: Shorts can
+    // run up to 3 minutes, and plenty of real videos are shorter than that.
+    if (rules.hideShorts && v.kind === 'short') return false
     // Live streams report a zero duration; length filters cannot apply to them.
     if (v.durationSec > 0 && (v.durationSec < minSec || v.durationSec > maxSec)) return false
     if (needle && !v.title.toLowerCase().includes(needle) && !v.channelTitle.toLowerCase().includes(needle)) {

@@ -49,20 +49,6 @@ export function Controls({ rules, onChange }: Props) {
       </label>
 
       <label className="control">
-        Last
-        <input
-          type="number"
-          min={1}
-          max={90}
-          value={rules.lookbackDays}
-          onChange={(e) =>
-            onChange({ lookbackDays: Math.min(90, Math.max(1, Number(e.target.value) || 1)) })
-          }
-        />
-        days
-      </label>
-
-      <label className="control">
         <input
           type="search"
           placeholder="Filter by title or channel…"
