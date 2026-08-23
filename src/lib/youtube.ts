@@ -305,9 +305,18 @@ export async function fetchFeed(
   let scanned = 0
   let delivered = 0
   let scanningDone = false
+  // Refs pulled off `pending` but still waiting on the pacer or in flight.
+  // Without this they would count as neither queued nor delivered, and the
+  // reported total would visibly dip while a batch waits for budget.
+  let inFlight = 0
 
   const report = () =>
-    onProgress({ scanned, channels: channels.length, videos: delivered, queued: pending.length })
+    onProgress({
+      scanned,
+      channels: channels.length,
+      videos: delivered,
+      queued: pending.length + inFlight,
+    })
 
   const produce = pool(channels, CHANNEL_SCAN_CONCURRENCY, async (channel) => {
     await channelPacer.take(1)
@@ -332,6 +341,8 @@ export async function fetchFeed(
         continue
       }
       const batch = pending.splice(0, DETAIL_CHUNK)
+      inFlight = batch.length
+      report()
       await videoPacer.take(batch.length)
       try {
         const videos = await fetchVideoDetails(batch)
@@ -342,6 +353,8 @@ export async function fetchFeed(
           title: `${batch.length} videos`,
           message: err instanceof Error ? err.message : String(err),
         })
+      } finally {
+        inFlight = 0
       }
       report()
     }
