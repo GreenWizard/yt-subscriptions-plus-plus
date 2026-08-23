@@ -6,15 +6,17 @@ import { getAccessToken, getClientId, hasValidToken, signOut } from './lib/auth'
 import { applyRules } from './lib/rules'
 import {
   clearCache,
+  getLastUserId,
   loadCache,
   loadRules,
   mergeVideos,
   pruneVideos,
   saveCache,
   saveRules,
+  setLastUserId,
 } from './lib/store'
 import type { Channel, FeedRules, Video } from './lib/types'
-import { fetchFeed, fetchSubscriptions } from './lib/youtube'
+import { fetchCurrentUser, fetchFeed, fetchSubscriptions } from './lib/youtube'
 
 const SUBS_TTL_MS = 12 * 3600_000
 
@@ -24,6 +26,7 @@ const CHECKPOINT_MS = 5_000
 export default function App() {
   const [configured, setConfigured] = useState(() => Boolean(getClientId()))
   const [signedIn, setSignedIn] = useState(false)
+  const [userId, setUserId] = useState<string | null>(null)
   const [channels, setChannels] = useState<Channel[]>([])
   const [videos, setVideos] = useState<Video[]>([])
   const [loaded, setLoaded] = useState(false)
@@ -37,13 +40,19 @@ export default function App() {
   // Authorization is never attempted on mount: the GIS token client always
   // opens a popup, and a popup not tied to a user gesture gets blocked.
   useEffect(() => {
-    void loadCache().then((c) => {
-      if (c) {
-        setChannels(c.channels)
-        setVideos(c.videos)
-      }
+    const last = getLastUserId()
+    if (!last) {
       setLoaded(true)
-    })
+    } else {
+      void loadCache(last).then((c) => {
+        if (c) {
+          setUserId(c.userId)
+          setChannels(c.channels)
+          setVideos(c.videos)
+        }
+        setLoaded(true)
+      })
+    }
     setSignedIn(configured && hasValidToken())
   }, [configured])
 
@@ -67,13 +76,22 @@ export default function App() {
       await getAccessToken(false).catch(() => getAccessToken(true))
       setSignedIn(true)
 
-      const current = await loadCache()
+      // Scope everything to the account that just signed in. Signing in as a
+      // different account swaps to that account's cache rather than
+      // overwriting the previous one.
+      const me = await fetchCurrentUser()
+      setUserId(me.id)
+      setLastUserId(me.id)
+
+      const current = await loadCache(me.id)
+      setChannels(current?.channels ?? [])
+      setVideos(current?.videos ?? [])
       const subsStale = !current || Date.now() - current.subsFetchedAt > SUBS_TTL_MS
       let subs = current?.channels ?? []
 
       if (force || subsStale || subs.length === 0) {
         setProgress('Loading subscriptions…')
-        subs = await fetchSubscriptions((n) => setProgress(`Loading subscriptions… ${n}`))
+        subs = await fetchSubscriptions(me.id, (n) => setProgress(`Loading subscriptions… ${n}`))
         setChannels(subs)
       }
 
@@ -84,6 +102,7 @@ export default function App() {
       const subsFetchedAt = subsStale || force ? Date.now() : (current?.subsFetchedAt ?? Date.now())
       const persist = () =>
         saveCache({
+          userId: me.id,
           channels: subs,
           videos: pruneVideos(mergeVideos(current?.videos ?? [], collected)),
           subsFetchedAt,
@@ -97,6 +116,7 @@ export default function App() {
 
       const result = await fetchFeed(
         subs,
+        me.id,
         known,
         !hideShortsRef.current,
         (p) => {
@@ -188,10 +208,12 @@ export default function App() {
           {error && (
             <button
               onClick={() => {
-                void clearCache().then(() => {
-                  setVideos([])
-                  setChannels([])
-                })
+                if (userId) {
+                  void clearCache(userId).then(() => {
+                    setVideos([])
+                    setChannels([])
+                  })
+                }
                 setError('')
               }}
             >

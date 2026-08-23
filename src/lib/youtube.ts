@@ -73,6 +73,26 @@ interface ListResponse<T> {
   nextPageToken?: string
 }
 
+export interface CurrentUser {
+  id: string
+  title: string
+}
+
+/**
+ * The signed-in account's own channel ID, used to scope cached rows so two
+ * accounts on the same browser do not overwrite each other.
+ */
+export async function fetchCurrentUser(): Promise<CurrentUser> {
+  const res = await apiGet<ListResponse<{ id: string; snippet?: { title?: string } }>>('channels', {
+    part: 'snippet',
+    mine: 'true',
+    maxResults: '1',
+  })
+  const me = res.items?.[0]
+  if (!me) throw new Error('This Google account has no YouTube channel.')
+  return { id: me.id, title: me.snippet?.title ?? 'You' }
+}
+
 interface SubscriptionItem {
   snippet: {
     title: string
@@ -81,7 +101,10 @@ interface SubscriptionItem {
   }
 }
 
-export async function fetchSubscriptions(onProgress?: (count: number) => void): Promise<Channel[]> {
+export async function fetchSubscriptions(
+  userId: string,
+  onProgress?: (count: number) => void,
+): Promise<Channel[]> {
   const channels: Channel[] = []
   let pageToken: string | undefined
 
@@ -97,6 +120,7 @@ export async function fetchSubscriptions(onProgress?: (count: number) => void): 
       const t = item.snippet.thumbnails
       channels.push({
         id: item.snippet.resourceId.channelId,
+        userId,
         title: item.snippet.title,
         thumbnail: t?.medium?.url ?? t?.default?.url ?? '',
       })
@@ -220,7 +244,7 @@ export function parseDuration(iso: string): number {
   return (+(d ?? 0) * 86400) + (+(h ?? 0) * 3600) + (+(min ?? 0) * 60) + +(s ?? 0)
 }
 
-export async function fetchVideoDetails(refs: VideoRef[]): Promise<Video[]> {
+export async function fetchVideoDetails(refs: VideoRef[], userId: string): Promise<Video[]> {
   const kindById = new Map(refs.map((r) => [r.id, r.kind]))
   const ids = refs.map((r) => r.id)
 
@@ -242,6 +266,7 @@ export async function fetchVideoDetails(refs: VideoRef[]): Promise<Video[]> {
       const known = kindById.get(item.id) ?? null
       return {
         id: item.id,
+        userId,
         channelId: item.snippet.channelId,
         channelTitle: item.snippet.channelTitle,
         title: item.snippet.title,
@@ -273,7 +298,10 @@ export interface FeedResult {
   failed: { title: string; message: string }[]
 }
 
-const CHANNEL_SCAN_CONCURRENCY = 4
+// Sized so the pacer, not parallelism, is what limits throughput: a channel
+// scan is two round trips, so too few workers would sit under the budget.
+const CHANNEL_SCAN_CONCURRENCY = 8
+const DETAIL_WORKERS = 2
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -288,6 +316,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
  */
 export async function fetchFeed(
   channels: Channel[],
+  userId: string,
   knownIds: Set<string>,
   includeShorts: boolean,
   onProgress: (p: RefreshProgress) => void,
@@ -333,7 +362,7 @@ export async function fetchFeed(
     report()
   })
 
-  const consume = (async () => {
+  const consume = async () => {
     for (;;) {
       if (pending.length === 0) {
         if (scanningDone) return
@@ -341,11 +370,11 @@ export async function fetchFeed(
         continue
       }
       const batch = pending.splice(0, DETAIL_CHUNK)
-      inFlight = batch.length
+      inFlight += batch.length
       report()
       await videoPacer.take(batch.length)
       try {
-        const videos = await fetchVideoDetails(batch)
+        const videos = await fetchVideoDetails(batch, userId)
         delivered += videos.length
         onVideos(videos)
       } catch (err) {
@@ -354,17 +383,21 @@ export async function fetchFeed(
           message: err instanceof Error ? err.message : String(err),
         })
       } finally {
-        inFlight = 0
+        inFlight -= batch.length
       }
       report()
     }
-  })()
+  }
+
+  // Several drainers share the one bucket, so fetch latency cannot hold
+  // throughput below the configured rate.
+  const consumers = Promise.all(Array.from({ length: DETAIL_WORKERS }, consume))
 
   await produce
   scanningDone = true
   // Nothing left to scan, so the whole budget belongs to video details.
   videoPacer.setRate(VIDEO_ITEMS_PER_SEC_SOLO)
-  await consume
+  await consumers
 
   return { failed }
 }

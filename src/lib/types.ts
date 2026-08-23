@@ -1,5 +1,7 @@
 export interface Channel {
   id: string
+  /** Channel ID of the signed-in YouTube account this row belongs to. */
+  userId: string
   title: string
   thumbnail: string
 }
@@ -14,6 +16,8 @@ export type VideoKind = 'long' | 'short' | 'live'
 
 export interface Video {
   id: string
+  /** Channel ID of the signed-in YouTube account this row belongs to. */
+  userId: string
   channelId: string
   channelTitle: string
   title: string
@@ -61,7 +65,7 @@ export const PAGES_PER_PLAYLIST = 2
  * Indexing budget. Channels and videos each get half while channels remain to
  * be scanned; once scanning finishes, videos take the whole allowance.
  */
-export const TOTAL_ITEMS_PER_MIN = 600
+export const TOTAL_ITEMS_PER_MIN = 3000
 export const CHANNEL_ITEMS_PER_SEC = TOTAL_ITEMS_PER_MIN / 2 / 60
 export const VIDEO_ITEMS_PER_SEC = TOTAL_ITEMS_PER_MIN / 2 / 60
 export const VIDEO_ITEMS_PER_SEC_SOLO = TOTAL_ITEMS_PER_MIN / 60
