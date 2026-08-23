@@ -68,16 +68,24 @@ Click **Sign in with Google**. Sign-in uses a popup, so allow popups for `localh
 
 Google gives each project 10,000 quota units per day, resetting at midnight Pacific.
 
-A full refresh costs roughly `2N` units for `N` subscribed channels — about 600 units at 300
-subscriptions, so ~16 full refreshes a day. The app keeps that low by:
+Scanning costs `2N` to `3N` units for `N` subscribed channels: one `playlistItems` call for the
+long-form list, a second if the channel has more than 50 uploads, and one for the live list, which
+for most channels 404s immediately. At 300 subscriptions that is roughly 600–900 units, so about
+11–16 scans a day before video details are counted.
+
+On top of that, `subscriptions.list` costs `ceil(N/50)`, the account lookup costs 1, and
+`videos.list` costs 1 unit per 50 videos actually fetched — which on a first index of 300 channels
+can be another ~600. Later refreshes are far cheaper, since only genuinely new videos and rows
+whose details have aged out need fetching.
+
+The app keeps the total down by:
 
 - deriving playlist IDs from the channel ID instead of spending a `channels.list` call per
   channel;
-- reading only video IDs while scanning channels, then fetching full details for videos it has
+- reading only video IDs while scanning channels, then fetching details only for videos it has
   not already cached;
-- caching subscriptions for 12 hours and video metadata in IndexedDB.
-
-Refreshes after the first are much cheaper, since only genuinely new videos need details fetched.
+- never reading the Shorts playlist at all;
+- caching video metadata in IndexedDB and re-reading a row only once its details are stale.
 
 ## Commands
 
@@ -101,13 +109,16 @@ src/
     auth.ts      Google Identity Services token flow (no client secret)
     youtube.ts   YouTube Data API v3 client, quota-conscious feed assembly
     rules.ts     Sorting and filtering — the actual "my own rules" logic
-    store.ts     Rule persistence, IndexedDB feed cache, merge and prune
+    store.ts     Rule persistence and validation, IndexedDB feed cache, merges
     idb.ts       ~50-line IndexedDB key/value helper, no dependencies
+    pacer.ts     Token bucket holding indexing to a deliberate rate
     format.ts    Duration, view count, and relative age formatting
-    types.ts     Shared types and default rules
+    types.ts     Shared types, default rules, and the pacing budget
   components/
-    Setup.tsx    One-time OAuth client ID entry with instructions
-    Controls.tsx Sort and filter bar
+    Setup.tsx         One-time OAuth client ID entry with instructions
+    Controls.tsx      Sort and filter bar
+    VirtualGrid.tsx   Mounts only the rows near the viewport
+    ConfirmDialog.tsx Modal with a delay before its destructive button arms
     VideoCard.tsx
   App.tsx        Refresh orchestration and layout
 ```
@@ -139,11 +150,18 @@ static host. Add the deployed origin to **Authorized JavaScript origins** under
   from it.
 - Progress is checkpointed to IndexedDB every few seconds, so closing the tab mid-index keeps what
   was already fetched; the next refresh resumes rather than re-requesting it.
-- Cached videos are never re-requested and never consume pacing budget.
+- A cached video is re-requested only once its details are older than `METADATA_TTL_MS` (6h) and
+  it was published within `METADATA_REFRESH_MAX_AGE_MS` (7 days), so view counts stay current
+  without re-reading a whole back catalogue. Everything else in the cache costs nothing and is
+  never re-fetched. New videos are always fetched ahead of stale ones.
 - The grid is virtualized: only the rows near the viewport are mounted, with spacers standing in
   for the rest. Mounting a few thousand cards leaves the main thread unresponsive, and growing the
   list on scroll only defers that — flick to the bottom and every card is mounted again. Card
   height is fixed (`.card-title` is pinned to two lines) so row geometry can be measured once.
+- Rules are validated field by field when read back from `localStorage`, not trusted. An entry
+  written by an older build or edited by hand is dropped per-field rather than taken on faith: an
+  unrecognized `sort` once reached the sort switch, returned `undefined`, and blanked the page on
+  every load until storage was cleared by hand.
 - Every cached channel and video row carries the `userId` of the signed-in YouTube account, and
   each account gets its own cache record. Signing in with a second account shows that account's
   feed without disturbing the first, and signing out does not discard anything.
