@@ -34,14 +34,19 @@ because the app has no server to hold credentials for you.
 
 1. Create a project in the [Google Cloud Console](https://console.cloud.google.com/projectcreate).
 2. **APIs & Services → Library** → enable **YouTube Data API v3**.
-3. **APIs & Services → OAuth consent screen** → **External**. Fill in the required fields, add the
-   scope `https://www.googleapis.com/auth/youtube.readonly`, and add your own Google account under
-   **Test users**. You do not need to publish or get the app verified — a test user can use it
-   indefinitely.
-4. **Credentials → Create credentials → OAuth client ID** → **Web application**. Under
-   **Authorized JavaScript origins** add `http://localhost:5173`. Leave redirect URIs empty; the
-   Google Identity Services token flow does not use them.
-5. Copy the client ID.
+3. Open [**Google Auth Platform**](https://console.cloud.google.com/auth/overview) and click
+   **Get started**. Give the app a name and a support email, set **Audience** to **External**, add
+   a contact email, and finish the wizard.
+4. **Google Auth Platform → Data Access** → **Add or remove scopes** → add
+   `https://www.googleapis.com/auth/youtube.readonly` → **Update**, then **Save**.
+5. **Google Auth Platform → Audience** → under **Test users**, **Add users** → your own Google
+   account. Leave the publishing status on **Testing**; a test user can use the app indefinitely
+   and no Google verification is required.
+6. **Google Auth Platform → Clients** → **Create client** → **Web application**. Under
+   **Authorized JavaScript origins** add both `http://localhost:5173` and `http://localhost` —
+   Google asks for the bare host as well as the port-specific origin when testing locally. Leave
+   **Authorized redirect URIs** empty; the Google Identity Services token flow does not use them.
+7. Copy the client ID.
 
 Then:
 
@@ -110,8 +115,8 @@ src/
 ## Deploying
 
 `npm run build` emits a fully static `dist/`, deployable to GitHub Pages, Vercel, Netlify, or any
-static host. Add the deployed origin to **Authorized JavaScript origins** in the Google Cloud
-Console, alongside `http://localhost:5173`.
+static host. Add the deployed origin to **Authorized JavaScript origins** under
+**Google Auth Platform → Clients → your client**, alongside the localhost entries.
 
 ## Notes and limits
 
