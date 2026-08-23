@@ -40,8 +40,9 @@ because the app has no server to hold credentials for you.
 4. **Google Auth Platform → Data Access** → **Add or remove scopes** → add
    `https://www.googleapis.com/auth/youtube.readonly` → **Update**, then **Save**.
 5. **Google Auth Platform → Audience** → under **Test users**, **Add users** → your own Google
-   account. Leave the publishing status on **Testing**; a test user can use the app indefinitely
-   and no Google verification is required.
+   account. Leave the publishing status on **Testing**: no Google verification is required, and up
+   to 100 test users are allowed. Test authorizations expire after 7 days, so expect to pass
+   through the consent screen again about once a week.
 6. **Google Auth Platform → Clients** → **Create client** → **Web application**. Under
    **Authorized JavaScript origins** add both `http://localhost:5173` and `http://localhost` —
    Google asks for the bare host as well as the port-specific origin when testing locally. Leave
@@ -129,3 +130,7 @@ static host. Add the deployed origin to **Authorized JavaScript origins** under
   on very prolific channels.
 - The lookback window filters the cached feed, but widening it past what has already been fetched
   needs a **Refresh** to pull the older videos in.
+- Only accounts on the **Test users** list can sign in; everyone else is refused with
+  `access_denied`. To let another account in, add it to that list. Publishing the app instead would
+  trigger Google verification, since `youtube.readonly` is a sensitive scope, and an unverified
+  published app carries a lifetime cap of 100 new users that cannot be reset.
