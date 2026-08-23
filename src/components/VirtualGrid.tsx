@@ -13,19 +13,15 @@ interface Metrics {
 }
 
 /**
- * Renders only the rows near the viewport, with spacers standing in for the
- * rest. A feed of several thousand cards otherwise leaves the main thread
- * unresponsive, and growing the list on scroll only defers that: flick to the
- * bottom and every card is mounted again.
+ * Renders only the rows near the viewport, with spacers standing in for the rest.
  *
- * Items must be a uniform height, since row geometry is measured once from a
- * single one rather than tracked per item. The video grid gets that from
- * `.card-title` being fixed to two lines; the channel list gets it from every
- * row carrying a full-height strip, placeholder included.
+ * Items must be a uniform height: row geometry is measured once from a single
+ * one rather than tracked per item. The video grid gets that from `.card-title`
+ * being fixed to two lines, the channel list from every row carrying a
+ * full-height strip, placeholder included.
  *
- * `className` and `itemSelector` are what let both views share this: the
- * channel list is a one-column grid of `.channel-row`, where the video feed is
- * a many-column grid of `.card`. Everything below is the same arithmetic.
+ * `className`/`itemSelector` are what let both views share this — a one-column
+ * grid of `.channel-row` against a many-column grid of `.card`.
  */
 export function VirtualGrid<T>({
   items,
@@ -51,7 +47,7 @@ export function VirtualGrid<T>({
 
     const measure = () => {
       const card = grid.querySelector<HTMLElement>(itemSelector)
-      // A zero-width viewport (hidden tab) yields degenerate geometry; keep the
+      // A zero-width viewport (hidden tab) gives degenerate geometry; keep the
       // last good measurement until the grid is laid out for real.
       if (!card || grid.clientWidth <= 0) return
       const style = getComputedStyle(grid)
@@ -67,9 +63,8 @@ export function VirtualGrid<T>({
 
     measure()
 
-    // React to width only. The grid's height changes as a result of measuring
-    // (a new row count mounts a different number of cards), so observing height
-    // would feed back into itself.
+    // Width only: measuring changes the grid's height (a new row count mounts a
+    // different number of cards), so observing height would feed back on itself.
     let lastWidth = grid.clientWidth
     const observer = new ResizeObserver((entries) => {
       const width = entries[0]?.contentRect.width ?? 0
@@ -86,8 +81,8 @@ export function VirtualGrid<T>({
   }, [items.length, itemSelector])
 
   useEffect(() => {
-    // Updating on every scroll event is cheap here: the work is O(1) arithmetic
-    // and React bails out when the computed slice is unchanged.
+    // Cheap on every scroll event: O(1) arithmetic, and React bails out when the
+    // computed slice is unchanged.
     const onScroll = () => setScrollY(window.scrollY)
     const onResize = () => setViewportH(window.innerHeight)
     window.addEventListener('scroll', onScroll, { passive: true })

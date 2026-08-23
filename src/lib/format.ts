@@ -21,8 +21,6 @@ export function formatAge(iso: string): string {
   const days = Math.floor(hours / 24)
   if (days < 7) return `${days}d ago`
   if (days < 30) return `${Math.floor(days / 7)}w ago`
-  // Past a year months stop carrying information: "38mo ago" is harder to read
-  // than "3y ago", and nobody is comparing videos that old by the month.
   if (days < 365) return `${Math.floor(days / 30)}mo ago`
   return `${Math.floor(days / 365)}y ago`
 }

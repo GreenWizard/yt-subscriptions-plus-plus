@@ -19,13 +19,12 @@ export function ConfirmDialog({
   onCancel,
 }: Props) {
   const ref = useRef<HTMLDialogElement>(null)
-  // A deadline rather than a tick count: an interval in a backgrounded tab is
-  // throttled, and counting its ticks would stretch the delay arbitrarily.
+  // A deadline rather than a tick count: intervals are throttled in a
+  // backgrounded tab, which would stretch the delay arbitrarily.
   const deadline = useRef(Date.now() + delaySec * 1000)
   const [left, setLeft] = useState(delaySec)
 
-  // showModal, not the `open` attribute: it is what gives the backdrop, the
-  // focus trap, and Escape.
+  // showModal, not the `open` attribute: it gives the backdrop, focus trap and Escape.
   useEffect(() => ref.current?.showModal(), [])
 
   useEffect(() => {
@@ -41,8 +40,7 @@ export function ConfirmDialog({
     <dialog
       className="confirm"
       ref={ref}
-      // Escape reaches the dialog directly; route it through the same cancel
-      // path so the caller always learns the dialog is gone.
+      // Escape reaches the dialog directly; route it through the same cancel path.
       onCancel={(e) => {
         e.preventDefault()
         onCancel()

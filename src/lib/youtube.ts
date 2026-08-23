@@ -78,10 +78,7 @@ export interface CurrentUser {
   title: string
 }
 
-/**
- * The signed-in account's own channel ID, used to scope cached rows so two
- * accounts on the same browser do not overwrite each other.
- */
+/** The account's own channel ID, which scopes every cached row. */
 export async function fetchCurrentUser(): Promise<CurrentUser> {
   const res = await apiGet<ListResponse<{ id: string; snippet?: { title?: string } }>>('channels', {
     part: 'snippet',
@@ -133,14 +130,11 @@ export async function fetchSubscriptions(
 }
 
 /**
- * YouTube auto-generates per-channel playlists whose IDs are the channel ID
- * with `UC` swapped for a type prefix. `UU` is everything; it decomposes into
- * long-form, Shorts, and live.
- *
- * Only long-form and live are read. Shorts are not wanted in this feed, and not
- * asking for them is also what stops them consuming the page budget and
- * starving older long-form uploads — which is what limited history to roughly a
- * week back when `UU` was read whole.
+ * YouTube auto-generates per-channel playlists whose IDs are the channel ID with
+ * `UC` swapped for a type prefix: `UU` is everything, and it decomposes into
+ * long-form, Shorts and live. Reading only long-form and live keeps Shorts out
+ * of the feed and stops them consuming the page budget, which is what limited
+ * history to about a week back when `UU` was read whole.
  */
 const PLAYLIST_KINDS = ['long', 'live'] as const
 
@@ -163,7 +157,7 @@ export interface VideoRef {
   kind: VideoKind | null
 }
 
-/** Read up to `maxPages` pages of video IDs from one playlist, newest first. */
+/** Video IDs from one playlist, newest first. */
 async function fetchPlaylistIds(id: string, maxPages: number): Promise<string[]> {
   const ids: string[] = []
   let pageToken: string | undefined
@@ -184,8 +178,8 @@ async function fetchPlaylistIds(id: string, maxPages: number): Promise<string[]>
 }
 
 /**
- * Video refs for one channel. The split playlists are undocumented, so a 404
- * on the long-form list falls back to the combined `UU` uploads playlist.
+ * The split playlists are undocumented, so a 404 on all of them falls back to
+ * the combined `UU` uploads playlist.
  */
 async function fetchChannelRefs(channelId: string): Promise<VideoRef[]> {
   if (!channelId.startsWith('UC')) {
@@ -202,14 +196,14 @@ async function fetchChannelRefs(channelId: string): Promise<VideoRef[]> {
         )
         return ids.map((id): VideoRef => ({ id, kind }))
       } catch (err) {
-        // A channel with no videos of this kind simply has no such playlist.
+        // A channel with no videos of this kind has no such playlist.
         if (err instanceof YouTubeError && err.status === 404) return null
         throw err
       }
     }),
   )
 
-  // Every split playlist missing means the prefixes did not apply here.
+  // All of them missing means the prefixes did not apply to this channel.
   if (perKind.every((r) => r === null)) {
     const ids = await fetchPlaylistIds(playlistId(channelId, 'UU'), PAGES_PER_PLAYLIST).catch(
       (err) => {
@@ -276,7 +270,7 @@ export async function fetchVideoDetails(refs: VideoRef[], userId: string): Promi
         durationSec,
         viewCount: Number(item.statistics?.viewCount ?? 0),
         isLive: item.snippet.liveBroadcastContent === 'live',
-        // Fallback path only: approximate by length against the Shorts ceiling.
+        // `UU` fallback only: nothing but duration distinguishes a Short there.
         kind: known ?? (durationSec > 0 && durationSec <= SHORTS_MAX_SEC ? 'short' : 'long'),
         fetchedAt: Date.now(),
       }
@@ -302,8 +296,7 @@ export interface FeedResult {
   failed: { title: string; message: string }[]
 }
 
-// Sized so the pacer, not parallelism, is what limits throughput: a channel
-// scan is two round trips, so too few workers would sit under the budget.
+// Sized so the pacer, not parallelism, limits throughput.
 const CHANNEL_SCAN_CONCURRENCY = 8
 const DETAIL_WORKERS = 2
 
@@ -311,17 +304,13 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
  * Index the subscription feed at a deliberate pace, streaming results out as
- * they arrive.
+ * they arrive. Channel scanning and detail fetching are a producer/consumer
+ * pair, each drawing on half the budget until scanning finishes and the video
+ * side takes the whole allowance.
  *
- * Channel scanning and video-detail fetching run as a producer/consumer pair,
- * each drawing on its own half of the budget. When scanning finishes, the
- * video side is handed the full allowance.
- *
- * Discovered videos are routed into two queues. Anything not in `knownIds` is
- * new and fetched first, so fresh uploads reach the grid quickly. Anything in
- * `staleIds` is already cached but its details have aged out, so it is re-read
- * afterwards to update the title, view count, and thumbnail in place. Cached
- * videos that are neither are skipped entirely and cost no budget.
+ * Discovered videos are routed into two queues: anything outside `knownIds` is
+ * new and fetched first, anything in `staleIds` is cached but aged out and
+ * re-read afterwards. Cached videos that are neither cost no budget.
  */
 export async function fetchFeed(
   channels: Channel[],
@@ -338,17 +327,16 @@ export async function fetchFeed(
   const stale: VideoRef[] = []
 
   const channelPacer = new Pacer(CHANNEL_ITEMS_PER_SEC, 5, 5)
-  // Seed a full batch so the first videos appear immediately; the average
-  // still settles at the configured rate.
+  // Seeded with a full batch so the first videos appear immediately; the
+  // average still settles at the configured rate.
   const videoPacer = new Pacer(VIDEO_ITEMS_PER_SEC, DETAIL_CHUNK, DETAIL_CHUNK)
 
   let scanned = 0
   let delivered = 0
   let updated = 0
   let scanningDone = false
-  // Refs pulled off a queue but still waiting on the pacer or in flight.
-  // Without this they would count as neither queued nor delivered, and the
-  // reported total would visibly dip while a batch waits for budget.
+  // Refs off a queue but still waiting on the pacer: counted as neither queued
+  // nor delivered, the reported total dips while a batch waits for budget.
   let inFlightNew = 0
   let inFlightStale = 0
 
@@ -380,9 +368,8 @@ export async function fetchFeed(
 
   const consume = async () => {
     for (;;) {
-      // New videos always win. Re-reading cached rows waits until discovery is
-      // finished and nothing new is left, so a refresh never delays fresh
-      // uploads to update numbers on videos the user has already seen.
+      // New videos always win: re-reads wait until discovery is done and nothing
+      // new is left, so a refresh never delays fresh uploads.
       const isNew = pending.length > 0
       if (!isNew && (!scanningDone || stale.length === 0)) {
         if (scanningDone && stale.length === 0) return
@@ -412,13 +399,12 @@ export async function fetchFeed(
     }
   }
 
-  // Several drainers share the one bucket, so fetch latency cannot hold
-  // throughput below the configured rate.
+  // Several drainers share one bucket, so fetch latency cannot hold throughput
+  // below the configured rate.
   const consumers = Promise.all(Array.from({ length: DETAIL_WORKERS }, consume))
 
   await produce
   scanningDone = true
-  // Nothing left to scan, so the whole budget belongs to video details.
   videoPacer.setRate(VIDEO_ITEMS_PER_SEC_SOLO)
   await consumers
 

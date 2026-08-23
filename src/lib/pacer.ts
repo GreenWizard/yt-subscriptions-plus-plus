@@ -1,10 +1,7 @@
 /**
- * Token bucket used to hold indexing to a deliberate rate. Without it the
- * initial index saturates the network and main thread, and the resulting
- * render churn makes scrolling stutter.
- *
- * Fields are declared explicitly rather than as constructor parameter
- * properties so the file remains plain type-erasable TypeScript.
+ * Token bucket holding indexing to a deliberate rate. Without it the initial
+ * index saturates the network and main thread, and the render churn that
+ * follows makes scrolling stutter.
  */
 export class Pacer {
   private tokens: number
@@ -12,12 +9,7 @@ export class Pacer {
   private readonly burst: number
   private lastRefill = Date.now()
 
-  /**
-   * @param ratePerSec tokens granted per second
-   * @param burst maximum tokens that can accumulate; must be at least the
-   *   largest single `take`, otherwise that call could never be satisfied
-   * @param initialTokens starting balance, so the first request need not wait
-   */
+  /** `burst` must be at least the largest single `take`, or it can never be satisfied. */
   constructor(ratePerSec: number, burst: number, initialTokens = 0) {
     this.ratePerSec = ratePerSec
     this.burst = burst

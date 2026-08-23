@@ -13,10 +13,8 @@ function dateInputValue(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
-/**
- * Presets fill the two pickers rather than acting as modes of their own, so the
- * range they chose stays visible and can be nudged afterwards.
- */
+// Presets fill the two pickers rather than acting as modes of their own, so the
+// range stays visible and can be nudged afterwards.
 const DATE_PRESETS: { label: string; from: (now: Date) => Date }[] = [
   { label: 'Last week', from: (n) => new Date(n.getFullYear(), n.getMonth(), n.getDate() - 7) },
   { label: 'Last month', from: (n) => new Date(n.getFullYear(), n.getMonth() - 1, n.getDate()) },
@@ -33,9 +31,8 @@ export function Controls({ rules, onChange }: Props) {
             value={rules.sort}
             onChange={(e) => {
               const sort = e.target.value as SortKey
-              // Picking shuffle deals a new order. Without this the seed is
-              // whatever was last persisted, so leaving shuffle and coming back
-              // would return to the same order it was left in.
+              // Picking shuffle deals a new order; otherwise the persisted seed
+              // would return to the order shuffle was last left in.
               onChange(sort === 'shuffle' ? { sort, shuffleSeed: randomShuffleSeed() } : { sort })
             }}
           >
@@ -47,8 +44,7 @@ export function Controls({ rules, onChange }: Props) {
           </select>
         </label>
 
-        {/* The one way to re-deal, since the order is otherwise fixed by the
-            stored seed and does not move as the feed is filtered or refreshed. */}
+        {/* The only way to re-deal: the order is otherwise fixed by the seed. */}
         {rules.sort === 'shuffle' && (
           <button className="chip" onClick={() => onChange({ shuffleSeed: randomShuffleSeed() })}>
             Shuffle again
@@ -71,7 +67,7 @@ export function Controls({ rules, onChange }: Props) {
           <input
             type="date"
             value={rules.fromDate}
-            // Bound each end by the other so the picker cannot offer an
+            // Bound each end by the other, so the picker cannot offer an
             // inverted range that would match nothing.
             max={rules.toDate || undefined}
             onChange={(e) => onChange({ fromDate: e.target.value })}
@@ -115,9 +111,8 @@ export function Controls({ rules, onChange }: Props) {
 
 /**
  * The channel list's own control bar. It shares the rules object and the muting
- * it writes, but not these two controls: the search here matches channel names
- * rather than video titles, and the video sorts and the release-date window
- * order and narrow videos, which a list of channels has no use for.
+ * it writes, but not these two controls: the search matches channel names rather
+ * than video titles, and the video sorts and date window have no meaning here.
  */
 export function ChannelControls({ rules, onChange }: Props) {
   return (

@@ -11,14 +11,10 @@ interface Props {
 }
 
 /**
- * One channel per row, with that channel's newest videos beside it.
- *
- * Virtualized through the same component as the video grid, one row per column
- * instead of many. It has to be: 350 subscriptions is 1750 cards and some
- * 11,500 nodes, and React mounts every one of them in the commit that opens the
- * view, which froze the tab for as long as it took. `content-visibility` was
- * not enough — it skips layout and paint for off-screen rows, but the mounting
- * and the nodes are what cost, and those happen either way.
+ * One channel per row, virtualized through the same component as the video grid
+ * with a single column. It has to be: 350 subscriptions is 1750 cards mounted in
+ * the commit that opens the view. `content-visibility` does not help — it skips
+ * layout and paint, but mounting is what costs.
  */
 export function ChannelList({ rows, onToggleMute, renderVideo }: Props) {
   return (
@@ -38,11 +34,7 @@ export function ChannelList({ rows, onToggleMute, renderVideo }: Props) {
   )
 }
 
-/**
- * Memoized like `VideoCard`, and for the same reason: virtualizing re-renders
- * the list on every scroll event, and the row object behind each of these is
- * rebuilt only when the cache or the rules change.
- */
+/** Memoized like `VideoCard`: virtualizing re-renders the list on every scroll. */
 const ChannelRowView = memo(function ChannelRowView({
   row,
   onToggleMute,
@@ -76,8 +68,7 @@ const ChannelRowView = memo(function ChannelRowView({
         <button
           className="chip channel-mute"
           onClick={() => onToggleMute(channel.id)}
-          // Muting hides the channel from the other view, not this one, so say
-          // which feed the switch acts on rather than leaving it to be guessed.
+          // Muting acts on the video feed, not on this list.
           title={muted ? 'Show this channel in the video feed' : 'Hide this channel from the video feed'}
         >
           {muted ? 'Unmute' : 'Mute'}
@@ -92,13 +83,10 @@ const ChannelRowView = memo(function ChannelRowView({
 })
 
 /**
- * Stands in for a channel with nothing indexed yet.
- *
- * Built from the card classes rather than styled as a note of its own, which is
- * what keeps every row exactly one card tall — the thumbnail's aspect ratio and
- * the two-line title clamp give it a real card's height at whatever width the
- * column happens to be. Virtualizing measures one row and applies that height
- * to all of them, so a shorter row here would mis-place every row below it.
+ * Built from the card classes rather than styled as a note of its own: that is
+ * what gives it a real card's height at any column width. Virtualizing measures
+ * one row and applies that height to all of them, so a shorter row here would
+ * mis-place every row below it.
  */
 function BlankCard() {
   return (

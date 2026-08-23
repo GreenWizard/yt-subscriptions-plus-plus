@@ -7,19 +7,14 @@ interface Props {
   video: Video
   channel?: Channel
   sort: SortKey
-  /**
-   * Off inside a channel row, where every card belongs to the channel already
-   * named in the row header and repeating it five times says nothing.
-   */
+  /** Off inside a channel row, where the header already names the channel. */
   showChannel?: boolean
 }
 
 /**
- * Memoized because VirtualGrid re-renders on every scroll event, which rebuilds
- * every mounted card's element ~60 times a second. All three props are stable
- * identities — `mergeVideos` keeps untouched rows, and the channel map is
- * memoized — so the shallow compare actually bails rather than just moving the
- * cost around.
+ * Memoized because VirtualGrid re-renders on every scroll event. All three props
+ * are stable identities — `mergeVideos` keeps untouched rows and the channel map
+ * is memoized — so the shallow compare bails rather than moving the cost around.
  */
 export const VideoCard = memo(function VideoCard({
   video,

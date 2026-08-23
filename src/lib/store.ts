@@ -10,11 +10,10 @@ import {
   type Video,
 } from './types'
 
-// Keys are versioned; earlier shapes predate per-video `kind` and per-row
-// `userId`, so old entries are simply left behind rather than migrated.
+// Keys are versioned; earlier shapes are left behind rather than migrated.
 const RULES_KEY = 'ytd.rules.v2'
-// One cache record per signed-in YouTube account. A single shared key meant a
-// second account's refresh overwrote the first account's feed.
+// One cache record per signed-in YouTube account, so a second account's refresh
+// cannot overwrite the first account's feed.
 const CACHE_PREFIX = 'cache.v3.'
 const LAST_USER_KEY = 'ytd.lastUserId'
 
@@ -48,21 +47,15 @@ function channelSortKey(value: unknown): ChannelSortKey {
 
 /**
  * `YYYY-MM-DD`, or '' for an unbounded end. A malformed string is dropped
- * rather than kept: it parses to `NaN`, every comparison against `NaN` is
- * false, and the effect is to silently disable the whole date window instead
- * of narrowing it.
+ * rather than kept: it parses to `NaN`, every comparison against `NaN` is false,
+ * and that silently disables the whole date window instead of narrowing it.
  */
 function dateString(value: unknown): string {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return ''
   return Number.isNaN(new Date(`${value}T00:00:00`).getTime()) ? '' : value
 }
 
-/**
- * A seed is only meaningful as an unsigned 32-bit int, which is the width the
- * mixing in `shuffleRank` works in. Anything else — a float, `NaN`, a
- * hand-edited string — falls back to the default rather than being coerced, so
- * a nonsense value cannot quietly collapse the shuffle onto one order.
- */
+/** Only an unsigned 32-bit int is meaningful to `shuffleRank`'s mixing. */
 function shuffleSeed(value: unknown): number {
   return typeof value === 'number' && Number.isInteger(value) && value >>> 0 === value
     ? value
@@ -70,15 +63,11 @@ function shuffleSeed(value: unknown): number {
 }
 
 /**
- * Rules come back out of `localStorage`, so every field is untrusted: it may
- * have been written by an older build or edited by hand. Each one is checked
- * against its own type and dropped if it does not fit.
- *
- * Taking values on trust is what made a single bad entry fatal — an
- * unrecognized `sort` reached `sortVideos`, which returned `undefined` and
- * blanked the app on every load until storage was cleared by hand. Listing the
- * fields rather than looping over keys also means adding a rule fails to
- * compile here until it is given a check of its own.
+ * Every field is untrusted: it may have been written by an older build or edited
+ * by hand. An unrecognized `sort` reached `sortVideos`, which returned
+ * `undefined` and blanked the app on every load until storage was cleared.
+ * Listing the fields rather than looping over keys also means adding a rule
+ * fails to compile here until it is given a check of its own.
  */
 export function loadRules(): FeedRules {
   try {
@@ -122,20 +111,18 @@ export async function clearCache(userId: string): Promise<void> {
 }
 
 /**
- * The rows of a cache record that belong to `userId`. Records are keyed per
- * account, so in normal use this filters nothing; it is a guard against a
- * record left by an account-blind build showing one account's feed to another.
+ * Records are keyed per account, so in normal use this filters nothing; it
+ * guards against a record left by an account-blind build showing one account's
+ * feed to another.
  */
 export function rowsForUser<T extends { userId: string }>(rows: T[], userId: string): T[] {
   return rows.filter((r) => r.userId === userId)
 }
 
 /**
- * Merge freshly fetched videos over the cached set: rows the API returned again
- * are updated in place, rows it did not mention are kept untouched. A refresh
- * only ever adds to the cache, so history already indexed is never re-fetched
- * and never lost — earlier versions capped the cache and silently dropped the
- * oldest rows on every refresh.
+ * Last-write-wins by id: rows the API returned again are updated in place, rows
+ * it did not mention are kept. A refresh only ever adds to the cache, so history
+ * already indexed is never re-fetched and never lost.
  */
 export function mergeVideos(cached: Video[], fresh: Video[]): Video[] {
   const byId = new Map(cached.map((v) => [v.id, v]))
@@ -144,8 +131,8 @@ export function mergeVideos(cached: Video[], fresh: Video[]): Video[] {
 }
 
 /**
- * Same last-write-wins merge for channels. Unsubscribing must not delete the
- * channel row, or every cached video from it loses its avatar.
+ * Same merge for channels. Unsubscribing must not delete the channel row, or
+ * every cached video from it loses its avatar.
  */
 export function mergeChannels(cached: Channel[], fresh: Channel[]): Channel[] {
   const byId = new Map(cached.map((c) => [c.id, c]))

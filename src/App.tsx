@@ -31,18 +31,10 @@ import { fetchCurrentUser, fetchFeed, fetchSubscriptions } from './lib/youtube'
 /** How often a long paced index writes its progress to IndexedDB. */
 const CHECKPOINT_MS = 5_000
 
-/**
- * How long the clear-cache confirmation stays un-clickable. Rebuilding a feed
- * costs many minutes of paced indexing, so the button is worth a real pause
- * rather than a dialog that can be dismissed by a second reflex click.
- */
+/** Rebuilding a feed costs minutes of paced indexing, so the button is worth a pause. */
 const CLEAR_CONFIRM_SEC = 5
 
-/**
- * Which view owns the page. Deliberately not persisted with the rules: this is
- * navigation rather than a filter, and a reload landing somewhere other than
- * the feed would be a surprise.
- */
+/** Not persisted with the rules: this is navigation, not a filter. */
 type View = 'subscriptions' | 'channels'
 
 const VIEWS: { id: View; label: string }[] = [
@@ -66,16 +58,12 @@ export default function App() {
   const [confirmingClear, setConfirmingClear] = useState(false)
   const [view, setView] = useState<View>('subscriptions')
 
-  // Restore the cached feed, and the session only if a token is already held.
-  // Authorization is never attempted on mount: the GIS token client always
-  // opens a popup, and a popup not tied to a user gesture gets blocked.
+  // Authorization is never attempted on mount: the GIS token client always opens
+  // a popup, and a popup not tied to a user gesture gets blocked.
   useEffect(() => {
     const session = configured && hasValidToken()
     setSignedIn(session)
 
-    // The cached feed is only shown to a signed-in session. Without a token
-    // there is nothing to refresh it against, so the grid stays empty rather
-    // than presenting a feed the user cannot act on.
     const last = getLastUserId()
     if (!session || !last) {
       setLoaded(true)
@@ -85,9 +73,8 @@ export default function App() {
     void loadCache(last).then((c) => {
       if (c) {
         setUserId(c.userId)
-        // Merge rather than assign: a refresh started before this read
-        // resolves has already streamed newer rows into state, and they must
-        // win over the cached copy instead of being replaced by it.
+        // Merge rather than assign: a refresh started before this read resolved
+        // has already streamed newer rows into state, and they must win.
         setChannels((prev) => mergeChannels(rowsForUser(c.channels, c.userId), prev))
         setVideos((prev) => mergeVideos(rowsForUser(c.videos, c.userId), prev))
       }
@@ -101,8 +88,8 @@ export default function App() {
     setRules((prev) => ({ ...prev, ...patch }))
   }, [])
 
-  // Mirrors the rendered feed so a refresh can fold what is already on screen
-  // into the record it writes, without taking `videos` as a dependency.
+  // Mirrors the feed so a refresh can fold what is on screen into the record it
+  // writes, without taking `videos` as a dependency.
   const videosRef = useRef<Video[]>([])
   videosRef.current = videos
 
@@ -111,9 +98,8 @@ export default function App() {
     setError('')
     setFailed([])
     try {
-      // Read the last account's cache alongside authorization so the feed is
-      // back on screen the instant a token lands, rather than after the
-      // account check and the subscription read have both come back.
+      // Read the cache alongside authorization, so the feed is back on screen
+      // the instant a token lands rather than after the account check.
       const last = getLastUserId()
       const restoring = last ? loadCache(last).catch(() => undefined) : undefined
 
@@ -127,16 +113,14 @@ export default function App() {
         setVideos(rowsForUser(restored.videos, restored.userId))
       }
 
-      // Scope everything to the account that just signed in. Signing in as a
-      // different account swaps to that account's cache rather than
-      // overwriting the previous one.
+      // Signing in as a different account swaps to that account's cache rather
+      // than overwriting the previous one.
       const me = await fetchCurrentUser()
       setUserId(me.id)
       setLastUserId(me.id)
 
-      // Usually the record just restored. Only a different account than last
-      // time needs another read, and it swaps the feed rather than adding to
-      // it — an account with no cache yet starts from an empty grid.
+      // Usually the record just restored; only a different account needs another
+      // read, and it swaps the feed rather than adding to it.
       let current = restored?.userId === me.id ? restored : undefined
       if (!current) {
         current = await loadCache(me.id)
@@ -144,9 +128,8 @@ export default function App() {
         setVideos(current ? rowsForUser(current.videos, me.id) : [])
       }
 
-      // Read every time rather than on a TTL. It is a handful of API units
-      // next to the video indexing, and it is what lets this run notice an
-      // unsubscribe the moment it happens.
+      // Read every time rather than on a TTL: a handful of API units next to the
+      // video indexing, and it is how a run notices an unsubscribe.
       setProgress('Loading subscriptions…')
       const subs = await fetchSubscriptions(me.id, (n) =>
         setProgress(`Loading subscriptions… ${n}`),
@@ -158,10 +141,8 @@ export default function App() {
       const collected: Video[] = []
       const cached = current ? rowsForUser(current.videos, me.id) : []
       const known = new Set(cached.map((v) => v.id))
-      // Cached rows whose details have aged out get re-read, so titles, view
-      // counts, and thumbnails stay current without discarding the row. Only
-      // recent uploads qualify: an old video's numbers no longer move, and
-      // re-reading the back catalogue would crowd out new videos.
+      // Cached rows whose details aged out are re-read in place. Only recent
+      // uploads qualify: re-reading the back catalogue would crowd out new videos.
       const staleBefore = Date.now() - METADATA_TTL_MS
       const publishedAfter = Date.now() - METADATA_REFRESH_MAX_AGE_MS
       const stale = new Set(
@@ -174,12 +155,11 @@ export default function App() {
           .map((v) => v.id),
       )
 
-      // Flipped once the whole run has succeeded: an interrupted refresh must
-      // not delete anything, since its picture of the account is incomplete.
+      // Flipped once the run has succeeded: an interrupted refresh must not
+      // delete anything, since its picture of the account is incomplete.
       let dropUnsubscribed = false
+      // Union of what is on disk, on screen, and fetched by this run.
       const persist = () => {
-        // Union of what is on disk, what is on screen, and what this run
-        // fetched. A refresh only ever adds rows or updates them in place.
         const all = mergeVideos(mergeVideos(cached, videosRef.current), collected)
         return saveCache({
           userId: me.id,
@@ -189,9 +169,8 @@ export default function App() {
         })
       }
 
-      // Indexing is deliberately slow, so checkpoint along the way: a tab
-      // closed mid-run must not discard everything already fetched and pay to
-      // request it all again.
+      // Indexing is deliberately slow, so checkpoint: a tab closed mid-run must
+      // not discard everything already fetched.
       let lastSave = Date.now()
 
       const result = await fetchFeed(
@@ -213,7 +192,6 @@ export default function App() {
         },
         (batch) => {
           collected.push(...batch)
-          // Show each batch immediately rather than waiting for the whole run.
           setVideos((prev) => mergeVideos(prev, batch))
           if (Date.now() - lastSave > CHECKPOINT_MS) {
             lastSave = Date.now()
@@ -222,13 +200,12 @@ export default function App() {
         },
       )
 
-      // The run completed, so the subscription list read at the top is a
-      // complete picture: a channel missing from it was unsubscribed, and it
-      // leaves with its videos rather than lingering as orphaned rows.
+      // The run completed, so the subscription list read at the top is a complete
+      // picture: a channel missing from it was unsubscribed and leaves with its
+      // videos rather than lingering as orphaned rows.
       dropUnsubscribed = true
 
-      // Merge over live state, not over the snapshot, so nothing already on
-      // screen can be dropped by the final write.
+      // Merge over live state, not the snapshot, so the final write drops nothing.
       setVideos((prev) => mergeVideos(prev, collected).filter((v) => subscribed.has(v.channelId)))
       setChannels(subs)
       setFailed(result.failed)
@@ -243,11 +220,10 @@ export default function App() {
 
   const channelsById = useMemo(() => new Map(channels.map((c) => [c.id, c])), [channels])
 
-  // Both views read the one cache; only the rules they consult differ. Each is
-  // built for its own view only, because `rules` is one object and any change
-  // to it is a new identity: without the guard, a keystroke in the channel
-  // filter re-sorted the entire video feed behind the view being looked at,
-  // which on a 300k-video cache is a second of work for nothing on screen.
+  // Both views read one cache, but each is built only for the view on screen:
+  // `rules` is a single object, so any change to it is a new identity, and
+  // without the guard a keystroke in the channel filter re-sorted the whole
+  // video feed behind the view — a second of work on a 300k-video cache.
   const visible = useMemo(
     () => (view === 'subscriptions' ? applyRules(videos, rules) : []),
     [view, videos, rules],
@@ -308,8 +284,7 @@ export default function App() {
               onClick={() => {
                 signOut()
                 setSignedIn(false)
-                // Hide the feed with the session. The cache itself is kept, so
-                // signing back in restores it without re-indexing.
+                // Hide the feed, but keep the cache: signing back in restores it.
                 setChannels([])
                 setVideos([])
                 setFailed([])
