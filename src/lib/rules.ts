@@ -7,6 +7,7 @@ export const SORT_LABELS: Record<SortKey, string> = {
   viewsPerHour: 'Trending (views/hour)',
   longest: 'Longest first',
   shortest: 'Shortest first',
+  shuffle: 'Shuffle',
 }
 
 function ageHours(video: Video): number {
@@ -15,6 +16,44 @@ function ageHours(video: Video): number {
 
 export function viewsPerHour(video: Video): number {
   return video.viewCount / ageHours(video)
+}
+
+/** A fresh `shuffleSeed`: an unsigned 32-bit int, which is what mixing takes. */
+export function randomShuffleSeed(): number {
+  return (Math.random() * 0x1_0000_0000) >>> 0
+}
+
+/**
+ * Where one video lands in the shuffle: the seed mixed with the video id
+ * (FNV-1a, then an avalanche step so neighbouring seeds do not produce
+ * neighbouring orders). Hashing rather than dealing a Fisher-Yates permutation
+ * keeps the order a property of the video itself, so it survives filtering — a
+ * video's place relative to the others does not move when a search narrows the
+ * feed around it, and a refresh drops new videos into the existing order rather
+ * than re-dealing it.
+ */
+function shuffleRank(id: string, seed: number): number {
+  let h = seed >>> 0
+  for (let i = 0; i < id.length; i++) {
+    h = Math.imul(h ^ id.charCodeAt(i), 16777619)
+  }
+  h = Math.imul(h ^ (h >>> 16), 2246822507)
+  h = Math.imul(h ^ (h >>> 13), 3266489909)
+  return (h ^ (h >>> 16)) >>> 0
+}
+
+/**
+ * Ranks are computed once per video instead of inside the comparator, which
+ * would re-hash the same id on each of its ~log n comparisons.
+ */
+function shuffled(videos: Video[], seed: number): Video[] {
+  return videos
+    .map((video) => ({ video, rank: shuffleRank(video.id, seed) }))
+    // Two ids can hash to the same 32-bit rank, and `sort` is only stable with
+    // respect to the input order — which for the feed is IndexedDB insertion
+    // order. Breaking ties on the id keeps one seed meaning one exact order.
+    .sort((a, b) => a.rank - b.rank || (a.video.id < b.video.id ? -1 : 1))
+    .map((entry) => entry.video)
 }
 
 export function applyRules(videos: Video[], rules: FeedRules): Video[] {
@@ -44,10 +83,10 @@ export function applyRules(videos: Video[], rules: FeedRules): Video[] {
     return true
   })
 
-  return sortVideos(filtered, rules.sort)
+  return sortVideos(filtered, rules.sort, rules.shuffleSeed)
 }
 
-export function sortVideos(videos: Video[], sort: SortKey): Video[] {
+export function sortVideos(videos: Video[], sort: SortKey, shuffleSeed: number): Video[] {
   const byDate = (a: Video, b: Video) =>
     new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime()
 
@@ -63,6 +102,8 @@ export function sortVideos(videos: Video[], sort: SortKey): Video[] {
       return sorted.sort((a, b) => b.durationSec - a.durationSec || byDate(a, b))
     case 'shortest':
       return sorted.sort((a, b) => a.durationSec - b.durationSec || byDate(a, b))
+    case 'shuffle':
+      return shuffled(sorted, shuffleSeed)
     // 'newest', and anything that is not a SortKey at all. The type says that
     // cannot happen, but the value can come from persisted state, and falling
     // out of the switch returns `undefined` — which blanks the entire app.

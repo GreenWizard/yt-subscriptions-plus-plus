@@ -49,6 +49,7 @@ export const SORT_KEYS = [
   'viewsPerHour',
   'longest',
   'shortest',
+  'shuffle',
 ] as const
 
 export type SortKey = (typeof SORT_KEYS)[number]
@@ -60,6 +61,14 @@ export interface FeedRules {
   toDate: string
   query: string
   mutedChannels: string[]
+  /**
+   * Seeds the `shuffle` order. The order has to be a pure function of the seed
+   * rather than of call time, because the feed is re-sorted on every keystroke
+   * and every streamed batch: a comparator that read `Math.random()` would deal
+   * the grid a new order under the viewer mid-scroll. Persisting it means a
+   * reload comes back to the same shuffle, and re-dealing is an explicit act.
+   */
+  shuffleSeed: number
 }
 
 export const DEFAULT_RULES: FeedRules = {
@@ -68,6 +77,8 @@ export const DEFAULT_RULES: FeedRules = {
   toDate: '',
   query: '',
   mutedChannels: [],
+  // Unused until `shuffle` is picked, which deals a real seed as it is chosen.
+  shuffleSeed: 0,
 }
 
 /** Videos read per playlist per channel on a refresh (50 per API call). */

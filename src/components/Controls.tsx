@@ -1,4 +1,4 @@
-import { SORT_LABELS } from '../lib/rules'
+import { randomShuffleSeed, SORT_LABELS } from '../lib/rules'
 import type { FeedRules, SortKey } from '../lib/types'
 
 interface Props {
@@ -29,7 +29,16 @@ export function Controls({ rules, onChange }: Props) {
       <div className="controls-row">
         <label className="control">
           Sort
-          <select value={rules.sort} onChange={(e) => onChange({ sort: e.target.value as SortKey })}>
+          <select
+            value={rules.sort}
+            onChange={(e) => {
+              const sort = e.target.value as SortKey
+              // Picking shuffle deals a new order. Without this the seed is
+              // whatever was last persisted, so leaving shuffle and coming back
+              // would return to the same order it was left in.
+              onChange(sort === 'shuffle' ? { sort, shuffleSeed: randomShuffleSeed() } : { sort })
+            }}
+          >
             {(Object.keys(SORT_LABELS) as SortKey[]).map((key) => (
               <option key={key} value={key}>
                 {SORT_LABELS[key]}
@@ -37,6 +46,14 @@ export function Controls({ rules, onChange }: Props) {
             ))}
           </select>
         </label>
+
+        {/* The one way to re-deal, since the order is otherwise fixed by the
+            stored seed and does not move as the feed is filtered or refreshed. */}
+        {rules.sort === 'shuffle' && (
+          <button className="chip" onClick={() => onChange({ shuffleSeed: randomShuffleSeed() })}>
+            Shuffle again
+          </button>
+        )}
 
         <label className="control">
           <input

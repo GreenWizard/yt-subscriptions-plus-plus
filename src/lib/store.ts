@@ -50,6 +50,18 @@ function dateString(value: unknown): string {
 }
 
 /**
+ * A seed is only meaningful as an unsigned 32-bit int, which is the width the
+ * mixing in `shuffleRank` works in. Anything else — a float, `NaN`, a
+ * hand-edited string — falls back to the default rather than being coerced, so
+ * a nonsense value cannot quietly collapse the shuffle onto one order.
+ */
+function shuffleSeed(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >>> 0 === value
+    ? value
+    : DEFAULT_RULES.shuffleSeed
+}
+
+/**
  * Rules come back out of `localStorage`, so every field is untrusted: it may
  * have been written by an older build or edited by hand. Each one is checked
  * against its own type and dropped if it does not fit.
@@ -75,6 +87,7 @@ export function loadRules(): FeedRules {
       mutedChannels: Array.isArray(s.mutedChannels)
         ? s.mutedChannels.filter((c): c is string => typeof c === 'string')
         : DEFAULT_RULES.mutedChannels,
+      shuffleSeed: shuffleSeed(s.shuffleSeed),
     }
   } catch {
     return DEFAULT_RULES
