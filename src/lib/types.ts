@@ -56,3 +56,12 @@ export const DEFAULT_RULES: FeedRules = {
 
 /** Videos read per playlist per channel on a refresh (50 per API call). */
 export const PAGES_PER_PLAYLIST = 2
+
+/**
+ * Indexing budget. Channels and videos each get half while channels remain to
+ * be scanned; once scanning finishes, videos take the whole allowance.
+ */
+export const TOTAL_ITEMS_PER_MIN = 600
+export const CHANNEL_ITEMS_PER_SEC = TOTAL_ITEMS_PER_MIN / 2 / 60
+export const VIDEO_ITEMS_PER_SEC = TOTAL_ITEMS_PER_MIN / 2 / 60
+export const VIDEO_ITEMS_PER_SEC_SOLO = TOTAL_ITEMS_PER_MIN / 60

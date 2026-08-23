@@ -18,6 +18,9 @@ import { fetchFeed, fetchSubscriptions } from './lib/youtube'
 
 const SUBS_TTL_MS = 12 * 3600_000
 
+/** How often a long paced index writes its progress to IndexedDB. */
+const CHECKPOINT_MS = 5_000
+
 export default function App() {
   const [configured, setConfigured] = useState(() => Boolean(getClientId()))
   const [signedIn, setSignedIn] = useState(false)
@@ -78,18 +81,40 @@ export default function App() {
       const collected: Video[] = []
       const known = new Set((current?.videos ?? []).map((v) => v.id))
 
+      const subsFetchedAt = subsStale || force ? Date.now() : (current?.subsFetchedAt ?? Date.now())
+      const persist = () =>
+        saveCache({
+          channels: subs,
+          videos: pruneVideos(mergeVideos(current?.videos ?? [], collected)),
+          subsFetchedAt,
+          feedFetchedAt: Date.now(),
+        })
+
+      // Indexing is deliberately slow, so checkpoint along the way: a tab
+      // closed mid-run must not discard everything already fetched and pay to
+      // request it all again.
+      let lastSave = Date.now()
+
       const result = await fetchFeed(
         subs,
         known,
         !hideShortsRef.current,
-        (p) =>
+        (p) => {
+          const queued = p.queued > 0 ? ` · ${p.queued} queued` : ''
           setProgress(
-            `Scanning ${p.scanned}/${p.channels} channels${p.videos ? ` · ${p.videos} new videos` : ''}…`,
-          ),
+            p.scanned < p.channels
+              ? `Scanning ${p.scanned}/${p.channels} channels · ${p.videos} videos${queued}…`
+              : `Fetching videos · ${p.videos} done${queued}…`,
+          )
+        },
         (batch) => {
           collected.push(...batch)
           // Show each batch immediately rather than waiting for the whole run.
           setVideos((prev) => mergeVideos(prev, batch))
+          if (Date.now() - lastSave > CHECKPOINT_MS) {
+            lastSave = Date.now()
+            void persist()
+          }
         },
       )
 
@@ -97,12 +122,7 @@ export default function App() {
       setVideos(merged)
       setChannels(subs)
       setFailed(result.failed)
-      await saveCache({
-        channels: subs,
-        videos: merged,
-        subsFetchedAt: subsStale || force ? Date.now() : (current?.subsFetchedAt ?? Date.now()),
-        feedFetchedAt: Date.now(),
-      })
+      await persist()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {

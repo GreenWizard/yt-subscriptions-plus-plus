@@ -135,6 +135,14 @@ static host. Add the deployed origin to **Authorized JavaScript origins** under
 - Turning **Hide Shorts** off only reveals Shorts fetched by a later refresh; Shorts are not
   downloaded while the rule is on.
 - Channels whose scan fails are reported in the status bar rather than silently omitted.
+- Indexing is deliberately paced to 600 items per minute, split evenly between channel scans and
+  video fetches; once every channel is scanned, videos take the whole allowance. Unpaced indexing
+  saturated the network and main thread badly enough to make scrolling stutter. The trade is that
+  a large first index runs for minutes rather than seconds — see `TOTAL_ITEMS_PER_MIN` in
+  `src/lib/types.ts` to change it.
+- Progress is checkpointed to IndexedDB every few seconds, so closing the tab mid-index keeps what
+  was already fetched; the next refresh resumes rather than re-requesting it.
+- Cached videos are never re-requested and never consume pacing budget.
 - Only accounts on the **Test users** list can sign in; everyone else is refused with
   `access_denied`. To let another account in, add it to that list. Publishing the app instead would
   trigger Google verification, since `youtube.readonly` is a sensitive scope, and an unverified

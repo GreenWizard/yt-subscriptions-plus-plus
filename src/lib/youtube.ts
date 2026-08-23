@@ -1,5 +1,14 @@
 import { getAccessToken, invalidateToken } from './auth'
-import { PAGES_PER_PLAYLIST, type Channel, type Video, type VideoKind } from './types'
+import { Pacer } from './pacer'
+import {
+  CHANNEL_ITEMS_PER_SEC,
+  PAGES_PER_PLAYLIST,
+  VIDEO_ITEMS_PER_SEC,
+  VIDEO_ITEMS_PER_SEC_SOLO,
+  type Channel,
+  type Video,
+  type VideoKind,
+} from './types'
 
 const API = 'https://www.googleapis.com/youtube/v3'
 const DETAIL_CHUNK = 50
@@ -255,6 +264,8 @@ export interface RefreshProgress {
   scanned: number
   channels: number
   videos: number
+  /** Discovered videos still queued behind the pacing budget. */
+  queued: number
 }
 
 export interface FeedResult {
@@ -262,10 +273,18 @@ export interface FeedResult {
   failed: { title: string; message: string }[]
 }
 
+const CHANNEL_SCAN_CONCURRENCY = 4
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
 /**
- * Scan every channel and stream video details back through `onVideos` as each
- * batch resolves, so the feed fills in progressively instead of appearing only
- * once the whole refresh completes.
+ * Index the subscription feed at a deliberate pace, streaming results out as
+ * they arrive.
+ *
+ * Channel scanning and video-detail fetching run as a producer/consumer pair,
+ * each drawing on its own half of the budget. When scanning finishes, the
+ * video side is handed the full allowance. Videos already in `knownIds` are
+ * never requested and never consume budget.
  */
 export async function fetchFeed(
   channels: Channel[],
@@ -277,24 +296,21 @@ export async function fetchFeed(
   const failed: { title: string; message: string }[] = []
   const seen = new Set(knownIds)
   const pending: VideoRef[] = []
-  const inflight: Promise<void>[] = []
+
+  const channelPacer = new Pacer(CHANNEL_ITEMS_PER_SEC, 5, 5)
+  // Seed a full batch so the first videos appear immediately; the average
+  // still settles at the configured rate.
+  const videoPacer = new Pacer(VIDEO_ITEMS_PER_SEC, DETAIL_CHUNK, DETAIL_CHUNK)
+
   let scanned = 0
   let delivered = 0
+  let scanningDone = false
 
-  const flush = (force: boolean) => {
-    while (pending.length >= DETAIL_CHUNK || (force && pending.length > 0)) {
-      const batch = pending.splice(0, DETAIL_CHUNK)
-      inflight.push(
-        fetchVideoDetails(batch).then((videos) => {
-          delivered += videos.length
-          onVideos(videos)
-          onProgress({ scanned, channels: channels.length, videos: delivered })
-        }),
-      )
-    }
-  }
+  const report = () =>
+    onProgress({ scanned, channels: channels.length, videos: delivered, queued: pending.length })
 
-  await pool(channels, 6, async (channel) => {
+  const produce = pool(channels, CHANNEL_SCAN_CONCURRENCY, async (channel) => {
+    await channelPacer.take(1)
     try {
       for (const ref of await fetchChannelRefs(channel.id, includeShorts)) {
         if (seen.has(ref.id)) continue
@@ -305,12 +321,37 @@ export async function fetchFeed(
       failed.push({ title: channel.title, message: err instanceof Error ? err.message : String(err) })
     }
     scanned++
-    onProgress({ scanned, channels: channels.length, videos: delivered })
-    flush(false)
+    report()
   })
 
-  flush(true)
-  await Promise.all(inflight)
+  const consume = (async () => {
+    for (;;) {
+      if (pending.length === 0) {
+        if (scanningDone) return
+        await sleep(100)
+        continue
+      }
+      const batch = pending.splice(0, DETAIL_CHUNK)
+      await videoPacer.take(batch.length)
+      try {
+        const videos = await fetchVideoDetails(batch)
+        delivered += videos.length
+        onVideos(videos)
+      } catch (err) {
+        failed.push({
+          title: `${batch.length} videos`,
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
+      report()
+    }
+  })()
+
+  await produce
+  scanningDone = true
+  // Nothing left to scan, so the whole budget belongs to video details.
+  videoPacer.setRate(VIDEO_ITEMS_PER_SEC_SOLO)
+  await consume
 
   return { failed }
 }
