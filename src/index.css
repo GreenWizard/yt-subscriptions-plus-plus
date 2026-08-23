@@ -94,6 +94,10 @@ input:focus, select:focus, button:focus-visible {
 
 .topbar {
   display: flex;
+  /* Wraps rather than overflowing: the row carries two view tabs, a count and
+     three buttons, which together outrun a phone-width viewport and used to
+     push the page into scrolling sideways. */
+  flex-wrap: wrap;
   align-items: center;
   gap: 14px;
   padding: 12px 22px;
@@ -101,8 +105,22 @@ input:focus, select:focus, button:focus-visible {
   border-bottom: 1px solid var(--border);
 }
 
-.brand { font-weight: 700; letter-spacing: -0.01em; }
-.brand span { color: var(--accent); }
+.brand { display: flex; align-items: center; gap: 4px; }
+
+/* The brand doubles as the view switch, so the two views read as one wordmark
+   with an active half rather than as a title with a button bolted beside it. */
+.brand-tab {
+  background: none;
+  border: 1px solid transparent;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--muted);
+  padding: 5px 9px;
+}
+.brand-tab span { color: var(--muted); }
+.brand-tab:hover:not(:disabled) { background: var(--surface-hi); border-color: transparent; }
+.brand-tab.is-active { color: var(--text); background: var(--surface-hi); border-color: var(--border); }
+.brand-tab.is-active span { color: var(--accent); }
 
 .spacer { flex: 1; }
 
@@ -262,3 +280,97 @@ dialog.confirm .row { display: flex; justify-content: flex-end; gap: 10px; }
 
 .empty { padding: 70px 22px; text-align: center; color: var(--muted); }
 
+
+/* ---- channel list ---- */
+
+/* One column, because VirtualGrid counts the tracks here to learn how many
+   items share a row. No vertical padding: the spacers that stand in for the
+   unrendered rows sit outside this element, so padding at the top would shift
+   the rows that are rendered out of step with the space reserved for them. */
+.channels {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 0 22px 30px;
+}
+
+/* Deliberately no `content-visibility: auto`, for the reason recorded above
+   `.card`: virtualizing measures one of these rows to place all the others, and
+   a skipped row reports `contain-intrinsic-size` rather than its real height.
+   It would also buy nothing now — only the rows near the viewport are mounted
+   at all, and mounting was the whole cost. */
+.channel-row {
+  padding: 18px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Muting hides the channel from the video grid, not from this list — the row
+   stays legible but reads as switched off, since this is where it is undone. */
+.channel-row.muted { opacity: 0.45; }
+.channel-row.muted:hover { opacity: 0.8; }
+
+.channel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-bottom: 13px;
+}
+
+/* The name is the row's subject, so it takes the slack and truncates last. */
+.channel-id { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1 1 auto; }
+.channel-mute { margin-left: auto; }
+.channel-id img, .channel-avatar-fallback {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  flex: none;
+}
+.channel-avatar-fallback { background: var(--surface-hi); border: 1px solid var(--border); }
+.channel-name {
+  font-weight: 600;
+  font-size: 15.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.channel-id:hover .channel-name { color: var(--accent); }
+
+.channel-stats { font-size: 13px; color: var(--muted); white-space: nowrap; }
+
+/* Too narrow for name, counts and switch on one line: the counts drop to their
+   own line rather than squeezing the channel name down to an initial. */
+@media (max-width: 620px) {
+  .channel-stats { order: 3; flex-basis: 100%; }
+}
+
+/* Up to five cards, as many as the width actually fits: measured 5 / 4 / 3 / 2
+   / 1 columns from 1400px down to 330px.
+
+   The track minimum is a fifth of the row, floored at a readable width, which
+   is what caps the row at five columns: at full width a fifth is the largest of
+   the two, so exactly five tracks fit and no sixth can be created; once the row
+   is narrow enough that a fifth falls under the floor, the floor takes over and
+   fewer tracks fit. `auto-fill` rather than `auto-fit` is what keeps a channel
+   with three videos to three fifth-width cards — `auto-fit` would collapse the
+   two empty tracks and stretch those three across the whole row, so rows would
+   change card size according to how much of the channel is indexed.
+
+   Whatever does not fit wraps into implicit rows, which are given no height and
+   clipped away. Those cards stay in the DOM but lay out at zero height, so
+   their `loading="lazy"` thumbnails are never fetched. */
+.channel-videos {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(max(215px, calc((100% - 4 * 16px) / 5)), 1fr));
+  grid-template-rows: auto;
+  grid-auto-rows: 0;
+  gap: 0 16px;
+  overflow: hidden;
+}
+
+/* Reads as an outline rather than a video, while keeping a card's exact box. */
+.card.blank { color: var(--muted); }
+.card.blank .thumb {
+  background: none;
+  border: 1px dashed var(--border);
+}
+.card.blank .card-title { font-weight: 500; }

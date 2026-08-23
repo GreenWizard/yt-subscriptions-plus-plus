@@ -1,8 +1,10 @@
 import { idbGet, idbSet, idbDel } from './idb'
 import {
+  CHANNEL_SORT_KEYS,
   DEFAULT_RULES,
   SORT_KEYS,
   type Channel,
+  type ChannelSortKey,
   type FeedRules,
   type SortKey,
   type Video,
@@ -36,6 +38,12 @@ export interface FeedCache {
 
 function sortKey(value: unknown): SortKey {
   return (SORT_KEYS as readonly unknown[]).includes(value) ? (value as SortKey) : DEFAULT_RULES.sort
+}
+
+function channelSortKey(value: unknown): ChannelSortKey {
+  return (CHANNEL_SORT_KEYS as readonly unknown[]).includes(value)
+    ? (value as ChannelSortKey)
+    : DEFAULT_RULES.channelSort
 }
 
 /**
@@ -87,6 +95,8 @@ export function loadRules(): FeedRules {
       mutedChannels: Array.isArray(s.mutedChannels)
         ? s.mutedChannels.filter((c): c is string => typeof c === 'string')
         : DEFAULT_RULES.mutedChannels,
+      channelSort: channelSortKey(s.channelSort),
+      channelQuery: typeof s.channelQuery === 'string' ? s.channelQuery : DEFAULT_RULES.channelQuery,
       shuffleSeed: shuffleSeed(s.shuffleSeed),
     }
   } catch {

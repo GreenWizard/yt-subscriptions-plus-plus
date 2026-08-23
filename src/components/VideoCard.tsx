@@ -7,6 +7,11 @@ interface Props {
   video: Video
   channel?: Channel
   sort: SortKey
+  /**
+   * Off inside a channel row, where every card belongs to the channel already
+   * named in the row header and repeating it five times says nothing.
+   */
+  showChannel?: boolean
 }
 
 /**
@@ -16,7 +21,12 @@ interface Props {
  * memoized — so the shallow compare actually bails rather than just moving the
  * cost around.
  */
-export const VideoCard = memo(function VideoCard({ video, channel, sort }: Props) {
+export const VideoCard = memo(function VideoCard({
+  video,
+  channel,
+  sort,
+  showChannel = true,
+}: Props) {
   const watchUrl = `https://www.youtube.com/watch?v=${video.id}`
   const channelUrl = `https://www.youtube.com/channel/${video.channelId}`
 
@@ -33,12 +43,14 @@ export const VideoCard = memo(function VideoCard({ video, channel, sort }: Props
         {video.title}
       </a>
 
-      <div className="card-channel">
-        {channel?.thumbnail && <img src={channel.thumbnail} alt="" loading="lazy" />}
-        <a href={channelUrl} target="_blank" rel="noreferrer">
-          {video.channelTitle}
-        </a>
-      </div>
+      {showChannel && (
+        <div className="card-channel">
+          {channel?.thumbnail && <img src={channel.thumbnail} alt="" loading="lazy" />}
+          <a href={channelUrl} target="_blank" rel="noreferrer">
+            {video.channelTitle}
+          </a>
+        </div>
+      )}
 
       <div className="card-meta">
         {formatCount(video.viewCount)} views · {formatAge(video.publishedAt)}

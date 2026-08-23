@@ -1,5 +1,5 @@
-import { randomShuffleSeed, SORT_LABELS } from '../lib/rules'
-import type { FeedRules, SortKey } from '../lib/types'
+import { CHANNEL_SORT_LABELS, randomShuffleSeed, SORT_LABELS } from '../lib/rules'
+import type { ChannelSortKey, FeedRules, SortKey } from '../lib/types'
 
 interface Props {
   rules: FeedRules
@@ -105,6 +105,51 @@ export function Controls({ rules, onChange }: Props) {
           className="chip"
           onClick={() => onChange({ fromDate: '', toDate: '' })}
           disabled={!rules.fromDate && !rules.toDate}
+        >
+          Reset
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The channel list's own control bar. It shares the rules object and the muting
+ * it writes, but not these two controls: the search here matches channel names
+ * rather than video titles, and the video sorts and the release-date window
+ * order and narrow videos, which a list of channels has no use for.
+ */
+export function ChannelControls({ rules, onChange }: Props) {
+  return (
+    <div className="controls">
+      <div className="controls-row">
+        <label className="control">
+          Sort
+          <select
+            value={rules.channelSort}
+            onChange={(e) => onChange({ channelSort: e.target.value as ChannelSortKey })}
+          >
+            {(Object.keys(CHANNEL_SORT_LABELS) as ChannelSortKey[]).map((key) => (
+              <option key={key} value={key}>
+                {CHANNEL_SORT_LABELS[key]}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="control">
+          <input
+            type="search"
+            placeholder="Filter by channel…"
+            value={rules.channelQuery}
+            onChange={(e) => onChange({ channelQuery: e.target.value })}
+          />
+        </label>
+
+        <button
+          className="chip"
+          onClick={() => onChange({ channelQuery: '' })}
+          disabled={!rules.channelQuery}
         >
           Reset
         </button>

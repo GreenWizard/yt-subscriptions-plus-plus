@@ -13,21 +13,30 @@ interface Metrics {
 }
 
 /**
- * Renders only the grid rows near the viewport, with spacers standing in for
- * the rest. A feed of several thousand cards otherwise leaves the main thread
+ * Renders only the rows near the viewport, with spacers standing in for the
+ * rest. A feed of several thousand cards otherwise leaves the main thread
  * unresponsive, and growing the list on scroll only defers that: flick to the
  * bottom and every card is mounted again.
  *
- * Cards are a uniform height (`.card-title` is fixed to two lines), so row
- * geometry can be measured once from a single card rather than tracked per
- * item.
+ * Items must be a uniform height, since row geometry is measured once from a
+ * single one rather than tracked per item. The video grid gets that from
+ * `.card-title` being fixed to two lines; the channel list gets it from every
+ * row carrying a full-height strip, placeholder included.
+ *
+ * `className` and `itemSelector` are what let both views share this: the
+ * channel list is a one-column grid of `.channel-row`, where the video feed is
+ * a many-column grid of `.card`. Everything below is the same arithmetic.
  */
 export function VirtualGrid<T>({
   items,
   renderItem,
+  className = 'grid',
+  itemSelector = '.card',
 }: {
   items: T[]
   renderItem: (item: T) => ReactNode
+  className?: string
+  itemSelector?: string
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const gridRef = useRef<HTMLDivElement | null>(null)
@@ -41,7 +50,7 @@ export function VirtualGrid<T>({
     if (!wrap || !grid) return
 
     const measure = () => {
-      const card = grid.querySelector<HTMLElement>('.card')
+      const card = grid.querySelector<HTMLElement>(itemSelector)
       // A zero-width viewport (hidden tab) yields degenerate geometry; keep the
       // last good measurement until the grid is laid out for real.
       if (!card || grid.clientWidth <= 0) return
@@ -74,7 +83,7 @@ export function VirtualGrid<T>({
       observer.disconnect()
       window.removeEventListener('resize', measure)
     }
-  }, [items.length])
+  }, [items.length, itemSelector])
 
   useEffect(() => {
     // Updating on every scroll event is cheap here: the work is O(1) arithmetic
@@ -111,7 +120,7 @@ export function VirtualGrid<T>({
   return (
     <div ref={wrapRef}>
       <div style={{ height: padTop }} />
-      <div className="grid" ref={gridRef}>
+      <div className={className} ref={gridRef}>
         {items.slice(start, end).map(renderItem)}
       </div>
       <div style={{ height: padBottom }} />

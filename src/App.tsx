@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ChannelList } from './components/ChannelList'
 import { ConfirmDialog } from './components/ConfirmDialog'
-import { Controls } from './components/Controls'
+import { ChannelControls, Controls } from './components/Controls'
 import { Setup } from './components/Setup'
 import { VideoCard } from './components/VideoCard'
 import { VirtualGrid } from './components/VirtualGrid'
 import { getAccessToken, getClientId, hasValidToken, signOut } from './lib/auth'
-import { applyRules } from './lib/rules'
+import { applyRules, channelRows } from './lib/rules'
 import {
   clearCache,
   getLastUserId,
@@ -37,6 +38,18 @@ const CHECKPOINT_MS = 5_000
  */
 const CLEAR_CONFIRM_SEC = 5
 
+/**
+ * Which view owns the page. Deliberately not persisted with the rules: this is
+ * navigation rather than a filter, and a reload landing somewhere other than
+ * the feed would be a surprise.
+ */
+type View = 'subscriptions' | 'channels'
+
+const VIEWS: { id: View; label: string }[] = [
+  { id: 'subscriptions', label: 'subscriptions' },
+  { id: 'channels', label: 'channels' },
+]
+
 
 export default function App() {
   const [configured, setConfigured] = useState(() => Boolean(getClientId()))
@@ -51,6 +64,7 @@ export default function App() {
   const [error, setError] = useState('')
   const [failed, setFailed] = useState<{ title: string; message: string }[]>([])
   const [confirmingClear, setConfirmingClear] = useState(false)
+  const [view, setView] = useState<View>('subscriptions')
 
   // Restore the cached feed, and the session only if a token is already held.
   // Authorization is never attempted on mount: the GIS token client always
@@ -228,7 +242,29 @@ export default function App() {
   }, [])
 
   const channelsById = useMemo(() => new Map(channels.map((c) => [c.id, c])), [channels])
-  const visible = useMemo(() => applyRules(videos, rules), [videos, rules])
+
+  // Both views read the one cache; only the rules they consult differ. Each is
+  // built for its own view only, because `rules` is one object and any change
+  // to it is a new identity: without the guard, a keystroke in the channel
+  // filter re-sorted the entire video feed behind the view being looked at,
+  // which on a 300k-video cache is a second of work for nothing on screen.
+  const visible = useMemo(
+    () => (view === 'subscriptions' ? applyRules(videos, rules) : []),
+    [view, videos, rules],
+  )
+  const rows = useMemo(
+    () => (view === 'channels' ? channelRows(videos, channels, rules) : []),
+    [view, videos, channels, rules],
+  )
+
+  const toggleMute = useCallback((channelId: string) => {
+    setRules((prev) => ({
+      ...prev,
+      mutedChannels: prev.mutedChannels.includes(channelId)
+        ? prev.mutedChannels.filter((id) => id !== channelId)
+        : [...prev.mutedChannels, channelId],
+    }))
+  }, [])
 
 
   if (!configured) return <Setup onReady={() => setConfigured(true)} />
@@ -237,13 +273,25 @@ export default function App() {
     <>
       <div className="head">
         <header className="topbar">
-        <div className="brand">
-          yt-subscriptions<span>++</span>
-        </div>
+        <nav className="brand">
+          {VIEWS.map(({ id, label }) => (
+            <button
+              key={id}
+              className={`brand-tab${view === id ? ' is-active' : ''}`}
+              aria-current={view === id}
+              onClick={() => setView(id)}
+            >
+              {label}
+              <span>++</span>
+            </button>
+          ))}
+        </nav>
         <div className="spacer" />
         {videos.length > 0 && (
           <span className="control">
-            {visible.length} of {videos.length} · {channels.length} channels
+            {view === 'channels'
+              ? `${rows.length} of ${channels.length} channels`
+              : `${visible.length} of ${videos.length} · ${channels.length} channels`}
           </span>
         )}
         {signedIn ? (
@@ -279,7 +327,11 @@ export default function App() {
         )}
         </header>
 
-        <Controls rules={rules} onChange={updateRules} />
+        {view === 'channels' ? (
+          <ChannelControls rules={rules} onChange={updateRules} />
+        ) : (
+          <Controls rules={rules} onChange={updateRules} />
+        )}
       </div>
 
       {(progress || error || failed.length > 0) && (
@@ -319,7 +371,35 @@ export default function App() {
         />
       )}
 
-      {visible.length > 0 ? (
+      {view === 'channels' ? (
+        rows.length > 0 ? (
+          <ChannelList
+            rows={rows}
+            onToggleMute={toggleMute}
+            renderVideo={(v) => (
+              <VideoCard
+                key={v.id}
+                video={v}
+                channel={channelsById.get(v.channelId)}
+                sort={rules.sort}
+                showChannel={false}
+              />
+            )}
+          />
+        ) : (
+          <div className="empty">
+            {busy
+              ? 'Loading your subscriptions…'
+              : !loaded
+                ? ''
+                : channels.length > 0
+                  ? 'No channels match your search.'
+                  : signedIn
+                    ? 'No subscriptions indexed for this account. Hit Refresh to load them.'
+                    : 'Sign in to pull your subscriptions and build the feed.'}
+          </div>
+        )
+      ) : visible.length > 0 ? (
         <VirtualGrid
           items={visible}
           renderItem={(v) => (

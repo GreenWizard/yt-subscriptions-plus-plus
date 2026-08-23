@@ -54,13 +54,38 @@ export const SORT_KEYS = [
 
 export type SortKey = (typeof SORT_KEYS)[number]
 
+/**
+ * Sorts for the channel list. Kept separate from `SORT_KEYS` because it orders
+ * channels rather than videos: most of the video sorts (duration, views) have
+ * no meaning for a channel row, and the two lists are validated separately on
+ * load for the same reason `SORT_KEYS` exists as a runtime value.
+ */
+export const CHANNEL_SORT_KEYS = ['recent', 'name'] as const
+
+export type ChannelSortKey = (typeof CHANNEL_SORT_KEYS)[number]
+
+/** Videos shown in one channel's row, if the row is wide enough for them. */
+export const VIDEOS_PER_CHANNEL_ROW = 5
+
 export interface FeedRules {
   sort: SortKey
   /** Release-date window as `YYYY-MM-DD`; '' means unbounded on that end. */
   fromDate: string
   toDate: string
   query: string
+  /**
+   * Channels hidden from the video grid. Set from the channel list, which shows
+   * muted channels anyway so the switch can be found again.
+   */
   mutedChannels: string[]
+  /**
+   * The channel list has its own sort and its own search, because they act on
+   * channels rather than on videos: the search matches channel names, and the
+   * date window and video sorts do not carry over. Both views nonetheless read
+   * one cache and share `mutedChannels`.
+   */
+  channelSort: ChannelSortKey
+  channelQuery: string
   /**
    * Seeds the `shuffle` order. The order has to be a pure function of the seed
    * rather than of call time, because the feed is re-sorted on every keystroke
@@ -77,6 +102,8 @@ export const DEFAULT_RULES: FeedRules = {
   toDate: '',
   query: '',
   mutedChannels: [],
+  channelSort: 'recent',
+  channelQuery: '',
   // Unused until `shuffle` is picked, which deals a real seed as it is chosen.
   shuffleSeed: 0,
 }
