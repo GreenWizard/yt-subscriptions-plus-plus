@@ -143,6 +143,10 @@ static host. Add the deployed origin to **Authorized JavaScript origins** under
 - Progress is checkpointed to IndexedDB every few seconds, so closing the tab mid-index keeps what
   was already fetched; the next refresh resumes rather than re-requesting it.
 - Cached videos are never re-requested and never consume pacing budget.
+- The grid is virtualized: only the rows near the viewport are mounted, with spacers standing in
+  for the rest. Mounting a few thousand cards leaves the main thread unresponsive, and growing the
+  list on scroll only defers that — flick to the bottom and every card is mounted again. Card
+  height is fixed (`.card-title` is pinned to two lines) so row geometry can be measured once.
 - Every cached channel and video row carries the `userId` of the signed-in YouTube account, and
   each account gets its own cache record. Signing in with a second account shows that account's
   feed without disturbing the first, and signing out does not discard anything.

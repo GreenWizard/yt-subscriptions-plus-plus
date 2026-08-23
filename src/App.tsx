@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Controls } from './components/Controls'
 import { Setup } from './components/Setup'
 import { VideoCard } from './components/VideoCard'
+import { VirtualGrid } from './components/VirtualGrid'
 import { getAccessToken, getClientId, hasValidToken, signOut } from './lib/auth'
 import { applyRules } from './lib/rules'
 import {
@@ -22,6 +23,7 @@ const SUBS_TTL_MS = 12 * 3600_000
 
 /** How often a long paced index writes its progress to IndexedDB. */
 const CHECKPOINT_MS = 5_000
+
 
 export default function App() {
   const [configured, setConfigured] = useState(() => Boolean(getClientId()))
@@ -154,6 +156,7 @@ export default function App() {
   const channelsById = useMemo(() => new Map(channels.map((c) => [c.id, c])), [channels])
   const visible = useMemo(() => applyRules(videos, rules), [videos, rules])
 
+
   if (!configured) return <Setup onReady={() => setConfigured(true)} />
 
   return (
@@ -224,16 +227,17 @@ export default function App() {
       )}
 
       {visible.length > 0 ? (
-        <div className="grid">
-          {visible.map((v) => (
+        <VirtualGrid
+          items={visible}
+          renderItem={(v) => (
             <VideoCard
               key={v.id}
               video={v}
               channel={channelsById.get(v.channelId)}
               sort={rules.sort}
             />
-          ))}
-        </div>
+          )}
+        />
       ) : (
         <div className="empty">
           {busy
