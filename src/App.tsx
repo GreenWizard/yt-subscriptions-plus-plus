@@ -28,17 +28,12 @@ export default function App() {
   const [progress, setProgress] = useState<string>('')
   const [error, setError] = useState<string>('')
 
-  // Restore the cached feed and, if Google can renew silently, the session too.
+  // Restore the cached feed, and the session only if a token is already held.
+  // Authorization is never attempted on mount: the GIS token client always
+  // opens a popup, and a popup not tied to a user gesture gets blocked.
   useEffect(() => {
     void loadCache().then((c) => c && setCache(c))
-    if (!configured) return
-    if (hasValidToken()) {
-      setSignedIn(true)
-      return
-    }
-    getAccessToken(false)
-      .then(() => setSignedIn(true))
-      .catch(() => setSignedIn(false))
+    setSignedIn(configured && hasValidToken())
   }, [configured])
 
   useEffect(() => saveRules(rules), [rules])
