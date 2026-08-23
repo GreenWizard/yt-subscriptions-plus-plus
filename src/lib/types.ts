@@ -8,9 +8,12 @@ export interface Channel {
 
 /**
  * Which auto-generated channel playlist a video came from. YouTube splits a
- * channel's uploads into long-form (UULF), Shorts (UUSH), and live (UULV);
- * `unknown` means it came from the combined UU fallback and was classified by
- * duration instead.
+ * channel's uploads into long-form (UULF), Shorts (UUSH), and live (UULV), and
+ * only the first two are ever read.
+ *
+ * `short` therefore never comes from a playlist: it is only ever assigned by
+ * duration on the combined `UU` fallback path, which returns everything and so
+ * is the one way a Short can enter the feed at all.
  */
 export type VideoKind = 'long' | 'short' | 'live'
 
@@ -21,13 +24,10 @@ export interface Video {
   channelId: string
   channelTitle: string
   title: string
-  description: string
   thumbnail: string
   publishedAt: string // ISO 8601
   durationSec: number
   viewCount: number
-  likeCount: number
-  commentCount: number
   isLive: boolean
   kind: VideoKind
   /**
@@ -37,19 +37,24 @@ export interface Video {
   fetchedAt?: number
 }
 
-export type SortKey =
-  | 'newest'
-  | 'oldest'
-  | 'views'
-  | 'viewsPerHour'
-  | 'longest'
-  | 'shortest'
+/**
+ * Every valid sort, as a runtime list. Persisted rules are untrusted, so the
+ * loader has to check a stored value against something at runtime; deriving
+ * `SortKey` from the list is what keeps the two from drifting apart.
+ */
+export const SORT_KEYS = [
+  'newest',
+  'oldest',
+  'views',
+  'viewsPerHour',
+  'longest',
+  'shortest',
+] as const
+
+export type SortKey = (typeof SORT_KEYS)[number]
 
 export interface FeedRules {
   sort: SortKey
-  hideShorts: boolean
-  minMinutes: number
-  maxMinutes: number // 0 = no upper bound
   /** Release-date window as `YYYY-MM-DD`; '' means unbounded on that end. */
   fromDate: string
   toDate: string
@@ -59,9 +64,6 @@ export interface FeedRules {
 
 export const DEFAULT_RULES: FeedRules = {
   sort: 'newest',
-  hideShorts: true,
-  minMinutes: 0,
-  maxMinutes: 0,
   fromDate: '',
   toDate: '',
   query: '',

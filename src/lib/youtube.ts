@@ -135,14 +135,18 @@ export async function fetchSubscriptions(
 /**
  * YouTube auto-generates per-channel playlists whose IDs are the channel ID
  * with `UC` swapped for a type prefix. `UU` is everything; it decomposes into
- * long-form, Shorts, and live. Reading the parts separately keeps Shorts from
- * consuming the page budget and starving older long-form uploads, which is
- * what limited history to roughly a week when reading `UU` alone.
+ * long-form, Shorts, and live.
+ *
+ * Only long-form and live are read. Shorts are not wanted in this feed, and not
+ * asking for them is also what stops them consuming the page budget and
+ * starving older long-form uploads — which is what limited history to roughly a
+ * week back when `UU` was read whole.
  */
-const PLAYLIST_PREFIX: Record<VideoKind, string> = {
+const PLAYLIST_KINDS = ['long', 'live'] as const
+
+const PLAYLIST_PREFIX: Record<(typeof PLAYLIST_KINDS)[number], string> = {
   long: 'UULF',
   live: 'UULV',
-  short: 'UUSH',
 }
 
 function playlistId(channelId: string, prefix: string): string {
@@ -150,7 +154,7 @@ function playlistId(channelId: string, prefix: string): string {
 }
 
 interface PlaylistItem {
-  contentDetails: { videoId: string; videoPublishedAt?: string }
+  contentDetails: { videoId: string }
 }
 
 export interface VideoRef {
@@ -183,16 +187,14 @@ async function fetchPlaylistIds(id: string, maxPages: number): Promise<string[]>
  * Video refs for one channel. The split playlists are undocumented, so a 404
  * on the long-form list falls back to the combined `UU` uploads playlist.
  */
-async function fetchChannelRefs(channelId: string, includeShorts: boolean): Promise<VideoRef[]> {
+async function fetchChannelRefs(channelId: string): Promise<VideoRef[]> {
   if (!channelId.startsWith('UC')) {
     const ids = await fetchPlaylistIds(channelId, PAGES_PER_PLAYLIST)
     return ids.map((id) => ({ id, kind: null }))
   }
 
-  const kinds: VideoKind[] = includeShorts ? ['long', 'live', 'short'] : ['long', 'live']
-
   const perKind = await Promise.all(
-    kinds.map(async (kind) => {
+    PLAYLIST_KINDS.map(async (kind) => {
       try {
         const ids = await fetchPlaylistIds(
           playlistId(channelId, PLAYLIST_PREFIX[kind]),
@@ -225,7 +227,6 @@ interface VideoItem {
   id: string
   snippet: {
     title: string
-    description: string
     channelId: string
     channelTitle: string
     publishedAt: string
@@ -233,7 +234,7 @@ interface VideoItem {
     thumbnails?: Record<string, { url: string } | undefined>
   }
   contentDetails: { duration: string }
-  statistics?: { viewCount?: string; likeCount?: string; commentCount?: string }
+  statistics?: { viewCount?: string }
 }
 
 /** Parse an ISO 8601 duration (PT1H2M3S) into seconds. */
@@ -270,13 +271,10 @@ export async function fetchVideoDetails(refs: VideoRef[], userId: string): Promi
         channelId: item.snippet.channelId,
         channelTitle: item.snippet.channelTitle,
         title: item.snippet.title,
-        description: item.snippet.description ?? '',
         thumbnail: t?.medium?.url ?? t?.high?.url ?? t?.default?.url ?? '',
         publishedAt: item.snippet.publishedAt,
         durationSec,
         viewCount: Number(item.statistics?.viewCount ?? 0),
-        likeCount: Number(item.statistics?.likeCount ?? 0),
-        commentCount: Number(item.statistics?.commentCount ?? 0),
         isLive: item.snippet.liveBroadcastContent === 'live',
         // Fallback path only: approximate by length against the Shorts ceiling.
         kind: known ?? (durationSec > 0 && durationSec <= SHORTS_MAX_SEC ? 'short' : 'long'),
@@ -330,7 +328,6 @@ export async function fetchFeed(
   userId: string,
   knownIds: Set<string>,
   staleIds: Set<string>,
-  includeShorts: boolean,
   onProgress: (p: RefreshProgress) => void,
   onVideos: (videos: Video[]) => void,
 ): Promise<FeedResult> {
@@ -368,7 +365,7 @@ export async function fetchFeed(
   const produce = pool(channels, CHANNEL_SCAN_CONCURRENCY, async (channel) => {
     await channelPacer.take(1)
     try {
-      for (const ref of await fetchChannelRefs(channel.id, includeShorts)) {
+      for (const ref of await fetchChannelRefs(channel.id)) {
         if (seen.has(ref.id)) continue
         seen.add(ref.id)
         if (!knownIds.has(ref.id)) pending.push(ref)

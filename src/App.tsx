@@ -92,12 +92,6 @@ export default function App() {
   const videosRef = useRef<Video[]>([])
   videosRef.current = videos
 
-  const hideShorts = rules.hideShorts
-  // Read inside refresh without making it a dependency, so a rule edit mid-run
-  // cannot rebuild the callback underneath an in-flight refresh.
-  const hideShortsRef = useRef(hideShorts)
-  hideShortsRef.current = hideShorts
-
   const refresh = useCallback(async () => {
     setBusy(true)
     setError('')
@@ -191,7 +185,6 @@ export default function App() {
         me.id,
         known,
         stale,
-        !hideShortsRef.current,
         (p) => {
           const queued = p.queued > 0 ? ` · ${p.queued} queued` : ''
           if (p.scanned < p.channels) {
@@ -345,7 +338,7 @@ export default function App() {
             : !loaded
               ? ''
               : videos.length > 0
-                ? 'No videos match your current rules. Try widening the length range or the release-date window.'
+                ? 'No videos match your current rules. Try widening the release-date window or clearing the search.'
                 : signedIn
                   ? 'Nothing indexed for this account. Hit Refresh to build the feed.'
                   : 'Sign in to pull your subscriptions and build the feed.'}

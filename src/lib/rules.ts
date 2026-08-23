@@ -9,7 +9,7 @@ export const SORT_LABELS: Record<SortKey, string> = {
   shortest: 'Shortest first',
 }
 
-export function ageHours(video: Video): number {
+function ageHours(video: Video): number {
   return Math.max(1, (Date.now() - new Date(video.publishedAt).getTime()) / 3_600_000)
 }
 
@@ -20,8 +20,6 @@ export function viewsPerHour(video: Video): number {
 export function applyRules(videos: Video[], rules: FeedRules): Video[] {
   const muted = new Set(rules.mutedChannels)
   const needle = rules.query.trim().toLowerCase()
-  const minSec = rules.minMinutes * 60
-  const maxSec = rules.maxMinutes > 0 ? rules.maxMinutes * 60 : Infinity
   // Both ends are inclusive whole days in the viewer's own timezone, which is
   // the calendar the date picker showed them.
   const from = rules.fromDate ? new Date(`${rules.fromDate}T00:00:00`).getTime() : -Infinity
@@ -32,11 +30,10 @@ export function applyRules(videos: Video[], rules: FeedRules): Video[] {
 
   const filtered = videos.filter((v) => {
     if (muted.has(v.channelId)) return false
-    // Shorts are identified by their source playlist, not by length: Shorts can
-    // run up to 3 minutes, and plenty of real videos are shorter than that.
-    if (rules.hideShorts && v.kind === 'short') return false
-    // Live streams report a zero duration; length filters cannot apply to them.
-    if (v.durationSec > 0 && (v.durationSec < minSec || v.durationSec > maxSec)) return false
+    // Shorts are not part of this feed. The Shorts playlist is never read, so
+    // in practice this only catches the `UU` fallback path, which returns a
+    // channel's uploads undivided and has nothing but duration to go on.
+    if (v.kind === 'short') return false
     if (windowed) {
       const published = new Date(v.publishedAt).getTime()
       if (published < from || published > to) return false
@@ -56,8 +53,6 @@ export function sortVideos(videos: Video[], sort: SortKey): Video[] {
 
   const sorted = [...videos]
   switch (sort) {
-    case 'newest':
-      return sorted.sort(byDate)
     case 'oldest':
       return sorted.sort((a, b) => -byDate(a, b))
     case 'views':
@@ -68,5 +63,12 @@ export function sortVideos(videos: Video[], sort: SortKey): Video[] {
       return sorted.sort((a, b) => b.durationSec - a.durationSec || byDate(a, b))
     case 'shortest':
       return sorted.sort((a, b) => a.durationSec - b.durationSec || byDate(a, b))
+    // 'newest', and anything that is not a SortKey at all. The type says that
+    // cannot happen, but the value can come from persisted state, and falling
+    // out of the switch returns `undefined` — which blanks the entire app.
+    // `loadRules` screens it too; this is the half that cannot be bypassed.
+    case 'newest':
+    default:
+      return sorted.sort(byDate)
   }
 }

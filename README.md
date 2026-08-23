@@ -1,7 +1,7 @@
 # YouTube Decomposer
 
-Your YouTube subscription feed, on your rules. No algorithm, no Shorts unless you ask, and
-sorting that goes beyond "newest".
+Your YouTube subscription feed, on your rules. No algorithm, no Shorts, and sorting that goes
+beyond "newest".
 
 It is a static single-page app: your browser talks to the YouTube Data API directly. There is no
 backend, no database, and no third party in the middle. Your subscriptions and the feed cache
@@ -20,11 +20,10 @@ never leave your machine.
 
 **Filtering**
 
-- **Hide Shorts** — excludes Shorts by their source playlist rather than by length.
-  Shorts can run up to 3 minutes, so a duration cutoff both misses long Shorts and
-  hides legitimately short videos.
-- **Length window** — min/max minutes (leave max at 0 for no upper bound).
+- **Release date** — inclusive from/to window, with presets, in your own timezone.
 - **Search** — substring match on video title or channel name.
+
+Shorts are not a filter: they are never fetched, so there is nothing to toggle.
 
 Rules persist in `localStorage`, so the feed opens the way you left it.
 
@@ -124,16 +123,14 @@ static host. Add the deployed origin to **Authorized JavaScript origins** under
 - Access tokens live one hour and are held in `sessionStorage`. The browser-only OAuth flow issues
   no refresh token, so a long session will re-authorize — usually silently, since Google can renew
   without a prompt while you are still signed in.
-- Live streams report a zero duration and are exempt from the length filters, so they never get
-  filtered out for being "too short".
 - Channel scanning reads at most two pages (100 videos) *per playlist* per channel per refresh,
   which bounds cost on very prolific channels.
 - YouTube's `UU` uploads playlist is the union of `UULF` (long-form), `UUSH` (Shorts), and `UULV`
-  (live). The app reads those parts separately, so Shorts never consume the page budget and starve
-  older long-form uploads. These prefixes are undocumented, so a channel where they do not resolve
-  falls back to `UU`, with Shorts approximated by the 3-minute ceiling.
-- Turning **Hide Shorts** off only reveals Shorts fetched by a later refresh; Shorts are not
-  downloaded while the rule is on.
+  (live). Only the long-form and live parts are read, which both keeps Shorts out and stops them
+  consuming the page budget and starving older long-form uploads. These prefixes are undocumented,
+  so a channel where they do not resolve falls back to `UU`, which comes back undivided — Shorts on
+  that path are identified by the 3-minute ceiling and dropped from the feed, the one place a
+  duration heuristic is still needed.
 - Channels whose scan fails are reported in the status bar rather than silently omitted.
 - Indexing is paced to 3000 items per minute, split evenly between channel scans and video
   fetches (25/s each); once every channel is scanned, videos take the whole 50/s allowance.

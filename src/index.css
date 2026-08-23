@@ -69,7 +69,7 @@ button.danger {
 }
 button.danger:hover:not(:disabled) { background: #ff6161; border-color: #ff6161; }
 
-select, input[type='text'], input[type='number'], input[type='search'], input[type='date'] {
+select, input[type='text'], input[type='search'], input[type='date'] {
   background: var(--surface-hi);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -129,19 +129,7 @@ input:focus, select:focus, button:focus-visible {
   font-size: 13px;
   color: var(--muted);
 }
-.control input[type='number'] { width: 70px; }
 .control input[type='search'] { width: 220px; }
-
-.checkbox {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  user-select: none;
-  font-size: 13px;
-  color: var(--muted);
-}
-.checkbox input { accent-color: var(--accent); width: 15px; height: 15px; }
 
 .status {
   padding: 10px 22px;
@@ -160,12 +148,18 @@ input:focus, select:focus, button:focus-visible {
   padding: 22px;
 }
 
+/* Deliberately no `content-visibility: auto` here. It buys almost nothing —
+   VirtualGrid already keeps only the rows near the viewport mounted, and most
+   of those are on screen — while breaking the row measurement that virtualizing
+   depends on: a skipped card reports `contain-intrinsic-size` from
+   `offsetHeight` instead of its real height. The true height tracks the
+   column width (the thumbnail is 16/9) but a fixed intrinsic size cannot, so
+   the error ran to ~6% and flipped sign with the viewport, mis-sizing the
+   spacers by more than a screen every 100 rows. */
 .card {
   display: flex;
   flex-direction: column;
   gap: 9px;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 290px;
 }
 
 .thumb {
@@ -268,4 +262,3 @@ dialog.confirm .row { display: flex; justify-content: flex-end; gap: 10px; }
 
 .empty { padding: 70px 22px; text-align: center; color: var(--muted); }
 
-.sentinel { height: 1px; }

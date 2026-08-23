@@ -38,34 +38,6 @@ export function Controls({ rules, onChange }: Props) {
           </select>
         </label>
 
-        <label className="checkbox">
-          <input
-            type="checkbox"
-            checked={rules.hideShorts}
-            onChange={(e) => onChange({ hideShorts: e.target.checked })}
-          />
-          Hide Shorts
-        </label>
-
-        <label className="control">
-          Length
-          <input
-            type="number"
-            min={0}
-            value={rules.minMinutes}
-            onChange={(e) => onChange({ minMinutes: Math.max(0, Number(e.target.value) || 0) })}
-          />
-          to
-          <input
-            type="number"
-            min={0}
-            placeholder="∞"
-            value={rules.maxMinutes || ''}
-            onChange={(e) => onChange({ maxMinutes: Math.max(0, Number(e.target.value) || 0) })}
-          />
-          min
-        </label>
-
         <label className="control">
           <input
             type="search"

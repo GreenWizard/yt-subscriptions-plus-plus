@@ -1,5 +1,12 @@
 import { idbGet, idbSet, idbDel } from './idb'
-import { DEFAULT_RULES, type Channel, type FeedRules, type Video } from './types'
+import {
+  DEFAULT_RULES,
+  SORT_KEYS,
+  type Channel,
+  type FeedRules,
+  type SortKey,
+  type Video,
+} from './types'
 
 // Keys are versioned; earlier shapes predate per-video `kind` and per-row
 // `userId`, so old entries are simply left behind rather than migrated.
@@ -27,17 +34,48 @@ export interface FeedCache {
   feedFetchedAt: number
 }
 
+function sortKey(value: unknown): SortKey {
+  return (SORT_KEYS as readonly unknown[]).includes(value) ? (value as SortKey) : DEFAULT_RULES.sort
+}
+
+/**
+ * `YYYY-MM-DD`, or '' for an unbounded end. A malformed string is dropped
+ * rather than kept: it parses to `NaN`, every comparison against `NaN` is
+ * false, and the effect is to silently disable the whole date window instead
+ * of narrowing it.
+ */
+function dateString(value: unknown): string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return ''
+  return Number.isNaN(new Date(`${value}T00:00:00`).getTime()) ? '' : value
+}
+
+/**
+ * Rules come back out of `localStorage`, so every field is untrusted: it may
+ * have been written by an older build or edited by hand. Each one is checked
+ * against its own type and dropped if it does not fit.
+ *
+ * Taking values on trust is what made a single bad entry fatal — an
+ * unrecognized `sort` reached `sortVideos`, which returned `undefined` and
+ * blanked the app on every load until storage was cleared by hand. Listing the
+ * fields rather than looping over keys also means adding a rule fails to
+ * compile here until it is given a check of its own.
+ */
 export function loadRules(): FeedRules {
   try {
     const raw = localStorage.getItem(RULES_KEY)
     if (!raw) return DEFAULT_RULES
-    const saved = JSON.parse(raw) as Partial<FeedRules>
-    // Take only keys that still exist, so removed rules cannot linger.
-    const merged = { ...DEFAULT_RULES }
-    for (const key of Object.keys(DEFAULT_RULES) as (keyof FeedRules)[]) {
-      if (saved[key] !== undefined) (merged[key] as unknown) = saved[key]
+    const saved = JSON.parse(raw) as unknown
+    if (typeof saved !== 'object' || saved === null) return DEFAULT_RULES
+    const s = saved as Record<string, unknown>
+    return {
+      sort: sortKey(s.sort),
+      fromDate: dateString(s.fromDate),
+      toDate: dateString(s.toDate),
+      query: typeof s.query === 'string' ? s.query : DEFAULT_RULES.query,
+      mutedChannels: Array.isArray(s.mutedChannels)
+        ? s.mutedChannels.filter((c): c is string => typeof c === 'string')
+        : DEFAULT_RULES.mutedChannels,
     }
-    return merged
   } catch {
     return DEFAULT_RULES
   }
