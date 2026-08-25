@@ -5,33 +5,27 @@ import { ChannelControls, Controls } from './components/Controls'
 import { Setup } from './components/Setup'
 import { VideoCard } from './components/VideoCard'
 import { VirtualGrid } from './components/VirtualGrid'
-import { getAccessToken, getClientId, hasValidToken, signOut } from './lib/auth'
+import { getAccessToken, getClientId, hasValidToken, invalidateToken, signOut } from './lib/auth'
+import type { FromWorker, ToWorker } from './lib/feed-protocol'
 import { applyRules, channelRows } from './lib/rules'
-import {
-  clearCache,
-  getLastUserId,
-  loadCache,
-  loadRules,
-  mergeChannels,
-  mergeVideos,
-  rowsForUser,
-  saveCache,
-  saveRules,
-  setLastUserId,
-} from './lib/store'
-import {
-  METADATA_REFRESH_MAX_AGE_MS,
-  METADATA_TTL_MS,
-  type Channel,
-  type FeedRules,
-  type Video,
-} from './lib/types'
-import { fetchCurrentUser, fetchFeed, fetchSubscriptions } from './lib/youtube'
+import { clearFeed, getLastUserId, loadFeed, loadRules, saveRules, setLastUserId } from './lib/store'
+import { type Channel, type FeedRules, type Video } from './lib/types'
 
-/** How often a long paced index writes its progress to IndexedDB. */
-const CHECKPOINT_MS = 5_000
+/**
+ * Streamed batches are buffered and folded into React state on this interval
+ * rather than one `setVideos` per batch: each state change re-sorts the whole
+ * feed, so coalescing is what keeps the grid smooth now that the Worker streams
+ * batches in as fast as the API returns them.
+ */
+/**
+ * The DB is the single source of truth, so the feed is re-read from it to
+ * repaint. During a run the worker writes rows continuously; this throttles the
+ * main thread's re-reads so a burst of writes turns into at most one read per
+ * window rather than one per batch. The final read on `done` is immediate.
+ */
+const DB_READ_MS = 500
 
-/** Rebuilding a feed costs minutes of paced indexing, so the button is worth a pause. */
+/** Rebuilding a feed costs minutes of indexing, so the button is worth a pause. */
 const CLEAR_CONFIRM_SEC = 5
 
 /** Not persisted with the rules: this is navigation, not a filter. */
@@ -42,9 +36,13 @@ const VIEWS: { id: View; label: string }[] = [
   { id: 'channels', label: 'channels' },
 ]
 
+// Offline fixtures mode (VITE_YT_MOCK=fixtures…): the worker fabricates all data
+// and needs no Google account, so the main thread skips OAuth setup and sign-in.
+const OFFLINE = (import.meta.env.VITE_YT_MOCK as string | undefined)?.startsWith('fixtures') ?? false
+
 
 export default function App() {
-  const [configured, setConfigured] = useState(() => Boolean(getClientId()))
+  const [configured, setConfigured] = useState(() => OFFLINE || Boolean(getClientId()))
   const [signedIn, setSignedIn] = useState(false)
   const [userId, setUserId] = useState<string | null>(null)
   const [channels, setChannels] = useState<Channel[]>([])
@@ -58,6 +56,35 @@ export default function App() {
   const [confirmingClear, setConfirmingClear] = useState(false)
   const [view, setView] = useState<View>('subscriptions')
 
+  // The account currently on screen, so a throttled DB read that resolves late
+  // is dropped rather than painting a feed the user has switched away from.
+  const shownUserRef = useRef<string | null>(null)
+  // Live for the duration of a run: the worker and the read-throttle timer.
+  const workerRef = useRef<Worker | null>(null)
+  const readTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Read one account's feed from the DB and paint it. This is the only path by
+  // which feed data reaches the UI: the worker writes to the DB, never to state.
+  const project = useCallback(async (uid: string) => {
+    const feed = await loadFeed(uid)
+    if (shownUserRef.current !== uid) return
+    setChannels(feed.channels)
+    setVideos(feed.videos)
+  }, [])
+
+  // Throttle re-reads to at most one per window; a run writes far faster than the
+  // grid needs to repaint.
+  const scheduleRead = useCallback(
+    (uid: string) => {
+      if (readTimerRef.current) return
+      readTimerRef.current = setTimeout(() => {
+        readTimerRef.current = null
+        void project(uid)
+      }, DB_READ_MS)
+    },
+    [project],
+  )
+
   // Authorization is never attempted on mount: the GIS token client always opens
   // a popup, and a popup not tied to a user gesture gets blocked.
   useEffect(() => {
@@ -70,17 +97,10 @@ export default function App() {
       return
     }
 
-    void loadCache(last).then((c) => {
-      if (c) {
-        setUserId(c.userId)
-        // Merge rather than assign: a refresh started before this read resolved
-        // has already streamed newer rows into state, and they must win.
-        setChannels((prev) => mergeChannels(rowsForUser(c.channels, c.userId), prev))
-        setVideos((prev) => mergeVideos(rowsForUser(c.videos, c.userId), prev))
-      }
-      setLoaded(true)
-    })
-  }, [configured])
+    setUserId(last)
+    shownUserRef.current = last
+    void project(last).finally(() => setLoaded(true))
+  }, [configured, project])
 
   useEffect(() => saveRules(rules), [rules])
 
@@ -88,100 +108,91 @@ export default function App() {
     setRules((prev) => ({ ...prev, ...patch }))
   }, [])
 
-  // Mirrors the feed so a refresh can fold what is on screen into the record it
-  // writes, without taking `videos` as a dependency.
-  const videosRef = useRef<Video[]>([])
-  videosRef.current = videos
+  useEffect(
+    () => () => {
+      workerRef.current?.terminate()
+      if (readTimerRef.current) clearTimeout(readTimerRef.current)
+    },
+    [],
+  )
 
   const refresh = useCallback(async () => {
     setBusy(true)
     setError('')
     setFailed([])
-    try {
-      // Read the cache alongside authorization, so the feed is back on screen
-      // the instant a token lands rather than after the account check.
-      const last = getLastUserId()
-      const restoring = last ? loadCache(last).catch(() => undefined) : undefined
 
-      await getAccessToken(false).catch(() => getAccessToken(true))
-      setSignedIn(true)
-
-      const restored = await restoring
-      if (restored) {
-        setUserId(restored.userId)
-        setChannels(rowsForUser(restored.channels, restored.userId))
-        setVideos(rowsForUser(restored.videos, restored.userId))
+    // Acquire the token here, inside the click handler, so the OAuth popup stays
+    // tied to the user gesture and is not blocked. The worker then obtains tokens
+    // silently over the RPC and never needs a popup on the common path.
+    if (!OFFLINE) {
+      try {
+        await getAccessToken(false).catch(() => getAccessToken(true))
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+        setBusy(false)
+        return
       }
+    }
+    setSignedIn(true)
+    setProgress('Loading subscriptions…')
 
-      // Signing in as a different account swaps to that account's cache rather
-      // than overwriting the previous one.
-      const me = await fetchCurrentUser()
-      setUserId(me.id)
-      setLastUserId(me.id)
+    // Replace any worker still running from a previous refresh.
+    workerRef.current?.terminate()
+    if (readTimerRef.current) clearTimeout(readTimerRef.current)
+    readTimerRef.current = null
 
-      // Usually the record just restored; only a different account needs another
-      // read, and it swaps the feed rather than adding to it.
-      let current = restored?.userId === me.id ? restored : undefined
-      if (!current) {
-        current = await loadCache(me.id)
-        setChannels(current ? rowsForUser(current.channels, me.id) : [])
-        setVideos(current ? rowsForUser(current.videos, me.id) : [])
-      }
+    const worker = new Worker(new URL('./lib/feed.worker.ts', import.meta.url), { type: 'module' })
+    workerRef.current = worker
+    const post = (msg: ToWorker) => worker.postMessage(msg)
 
-      // Read every time rather than on a TTL: a handful of API units next to the
-      // video indexing, and it is how a run notices an unsubscribe.
-      setProgress('Loading subscriptions…')
-      const subs = await fetchSubscriptions(me.id, (n) =>
-        setProgress(`Loading subscriptions… ${n}`),
-      )
-      const subscribed = new Set(subs.map((c) => c.id))
-      setChannels(subs)
+    // The account this run is for, learned from the worker's first message and
+    // used to read the right rows back from the DB.
+    let runUser: string | null = null
 
-      // Accumulate outside React state so streamed batches cannot race.
-      const collected: Video[] = []
-      const cached = current ? rowsForUser(current.videos, me.id) : []
-      const known = new Set(cached.map((v) => v.id))
-      // Cached rows whose details aged out are re-read in place. Only recent
-      // uploads qualify: re-reading the back catalogue would crowd out new videos.
-      const staleBefore = Date.now() - METADATA_TTL_MS
-      const publishedAfter = Date.now() - METADATA_REFRESH_MAX_AGE_MS
-      const stale = new Set(
-        cached
-          .filter(
-            (v) =>
-              (v.fetchedAt ?? 0) < staleBefore &&
-              new Date(v.publishedAt).getTime() >= publishedAfter,
-          )
-          .map((v) => v.id),
-      )
+    const cleanup = () => {
+      if (readTimerRef.current) clearTimeout(readTimerRef.current)
+      readTimerRef.current = null
+      worker.terminate()
+      if (workerRef.current === worker) workerRef.current = null
+      setBusy(false)
+      setProgress('')
+    }
 
-      // Flipped once the run has succeeded: an interrupted refresh must not
-      // delete anything, since its picture of the account is incomplete.
-      let dropUnsubscribed = false
-      // Union of what is on disk, on screen, and fetched by this run.
-      const persist = () => {
-        const all = mergeVideos(mergeVideos(cached, videosRef.current), collected)
-        return saveCache({
-          userId: me.id,
-          channels: subs,
-          videos: dropUnsubscribed ? all.filter((v) => subscribed.has(v.channelId)) : all,
-          feedFetchedAt: Date.now(),
-        })
-      }
-
-      // Indexing is deliberately slow, so checkpoint: a tab closed mid-run must
-      // not discard everything already fetched.
-      let lastSave = Date.now()
-
-      const result = await fetchFeed(
-        subs,
-        me.id,
-        known,
-        stale,
-        (p) => {
+    worker.onmessage = (event: MessageEvent<FromWorker>) => {
+      const msg = event.data
+      switch (msg.kind) {
+        case 'auth-request':
+          void (async () => {
+            try {
+              post({ kind: 'auth-result', id: msg.id, token: await getAccessToken(msg.interactive) })
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err)
+              post({ kind: 'auth-error', id: msg.id, message })
+            }
+          })()
+          break
+        case 'auth-invalidate':
+          invalidateToken()
+          break
+        case 'user':
+          runUser = msg.id
+          setUserId(msg.id)
+          setLastUserId(msg.id)
+          // Paint this account's existing cache straight from the DB. Switching
+          // accounts repoints `shownUserRef` first, so a late read for the old
+          // account is dropped rather than shown.
+          shownUserRef.current = msg.id
+          void project(msg.id)
+          break
+        case 'subs-progress':
+          setProgress(`Loading subscriptions… ${msg.count}`)
+          break
+        case 'feed-progress': {
+          const p = msg.progress
           const queued = p.queued > 0 ? ` · ${p.queued} queued` : ''
+          const unchanged = p.skipped > 0 ? ` (${p.skipped} unchanged)` : ''
           if (p.scanned < p.channels) {
-            setProgress(`Scanning ${p.scanned}/${p.channels} channels · ${p.videos} new${queued}…`)
+            setProgress(`Scanning ${p.scanned}/${p.channels} channels${unchanged} · ${p.videos} new${queued}…`)
           } else if (p.queued > 0) {
             setProgress(`Fetching new videos · ${p.videos} done${queued}…`)
           } else if (p.queuedStale > 0) {
@@ -189,34 +200,40 @@ export default function App() {
           } else {
             setProgress(`Finishing up · ${p.videos} new · ${p.updated} updated…`)
           }
-        },
-        (batch) => {
-          collected.push(...batch)
-          setVideos((prev) => mergeVideos(prev, batch))
-          if (Date.now() - lastSave > CHECKPOINT_MS) {
-            lastSave = Date.now()
-            void persist()
-          }
-        },
-      )
-
-      // The run completed, so the subscription list read at the top is a complete
-      // picture: a channel missing from it was unsubscribed and leaves with its
-      // videos rather than lingering as orphaned rows.
-      dropUnsubscribed = true
-
-      // Merge over live state, not the snapshot, so the final write drops nothing.
-      setVideos((prev) => mergeVideos(prev, collected).filter((v) => subscribed.has(v.channelId)))
-      setChannels(subs)
-      setFailed(result.failed)
-      await persist()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-      setProgress('')
+          break
+        }
+        case 'updated':
+          if (runUser) scheduleRead(runUser)
+          break
+        case 'done':
+          setFailed(msg.failed)
+          // One final, immediate read: the worker has written everything and
+          // pruned unsubscribed rows, so this reflects the settled DB.
+          if (readTimerRef.current) clearTimeout(readTimerRef.current)
+          readTimerRef.current = null
+          if (runUser) void project(runUser).finally(cleanup)
+          else cleanup()
+          break
+        case 'error':
+          setError(msg.message)
+          cleanup()
+          break
+      }
     }
-  }, [])
+
+    // A thrown error inside the worker never arrives as a message, so without
+    // this the run would hang with the spinner stuck on. Surface it and stop.
+    worker.onerror = (event) => {
+      setError(event.message || 'The feed worker failed.')
+      cleanup()
+    }
+    worker.onmessageerror = () => {
+      setError('The feed worker sent a message that could not be read.')
+      cleanup()
+    }
+
+    post({ kind: 'start' })
+  }, [project, scheduleRead])
 
   const channelsById = useMemo(() => new Map(channels.map((c) => [c.id, c])), [channels])
 
@@ -285,6 +302,9 @@ export default function App() {
                 signOut()
                 setSignedIn(false)
                 // Hide the feed, but keep the cache: signing back in restores it.
+                // Clearing the shown-account marker is what makes that restore
+                // happen — the next refresh sees the account as not-yet-painted.
+                shownUserRef.current = null
                 setChannels([])
                 setVideos([])
                 setFailed([])
@@ -330,13 +350,14 @@ export default function App() {
           title="Clear the cached feed?"
           message={`This deletes all ${videos.length} indexed ${
             videos.length === 1 ? 'video' : 'videos'
-          } for this account from this browser. Rebuilding them means re-reading every subscription, which takes several minutes of paced indexing.`}
+          } for this account from this browser. Rebuilding them means re-reading every subscription, which takes several minutes of indexing.`}
           confirmLabel="Clear cache"
           delaySec={CLEAR_CONFIRM_SEC}
           onCancel={() => setConfirmingClear(false)}
           onConfirm={() => {
             setConfirmingClear(false)
-            void clearCache(userId).then(() => {
+            shownUserRef.current = null
+            void clearFeed(userId).then(() => {
               setChannels([])
               setVideos([])
               setFailed([])

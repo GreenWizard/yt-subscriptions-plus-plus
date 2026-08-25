@@ -3,6 +3,14 @@ export interface Channel {
   userId: string
   title: string
   thumbnail: string
+  /**
+   * `contentDetails.totalItemCount` from the subscription: the channel's
+   * approximate upload count. A refresh scans a channel's playlists only when
+   * this differs from the stored value, so a channel that posted nothing costs
+   * no `playlistItems` calls. Absent on rows cached before this field existed,
+   * which is treated as "changed" and forces a scan.
+   */
+  totalItemCount?: number
 }
 
 /**
@@ -84,16 +92,7 @@ export const METADATA_TTL_MS = 6 * 3600_000
 
 /**
  * Videos published longer ago than this are never re-read: their view counts
- * have flattened, and re-reading a back catalogue would swallow the pacing
- * budget that new uploads need.
+ * have flattened, and re-reading a back catalogue would crowd out the new
+ * uploads a refresh exists to surface.
  */
 export const METADATA_REFRESH_MAX_AGE_MS = 7 * 24 * 3600_000
-
-/**
- * Indexing budget. Channels and videos each get half while channels remain to
- * be scanned; once scanning finishes, videos take the whole allowance.
- */
-export const TOTAL_ITEMS_PER_MIN = 3000
-export const CHANNEL_ITEMS_PER_SEC = TOTAL_ITEMS_PER_MIN / 2 / 60
-export const VIDEO_ITEMS_PER_SEC = TOTAL_ITEMS_PER_MIN / 2 / 60
-export const VIDEO_ITEMS_PER_SEC_SOLO = TOTAL_ITEMS_PER_MIN / 60

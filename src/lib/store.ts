@@ -1,4 +1,4 @@
-import { idbGet, idbSet, idbDel } from './idb'
+import { clearUser, getMeta, getRowsByUser, pruneUserRows, putMeta, putRows } from './idb'
 import {
   CHANNEL_SORT_KEYS,
   DEFAULT_RULES,
@@ -12,12 +12,7 @@ import {
 
 // Keys are versioned; earlier shapes are left behind rather than migrated.
 const RULES_KEY = 'ytd.rules.v2'
-// One cache record per signed-in YouTube account, so a second account's refresh
-// cannot overwrite the first account's feed.
-const CACHE_PREFIX = 'cache.v3.'
 const LAST_USER_KEY = 'ytd.lastUserId'
-
-const cacheKey = (userId: string) => `${CACHE_PREFIX}${userId}`
 
 /** The account whose cache should be shown before sign-in completes. */
 export function getLastUserId(): string | null {
@@ -28,8 +23,7 @@ export function setLastUserId(userId: string): void {
   localStorage.setItem(LAST_USER_KEY, userId)
 }
 
-export interface FeedCache {
-  userId: string
+export interface LoadedFeed {
   channels: Channel[]
   videos: Video[]
   feedFetchedAt: number
@@ -97,45 +91,56 @@ export function saveRules(rules: FeedRules): void {
   localStorage.setItem(RULES_KEY, JSON.stringify(rules))
 }
 
-export async function loadCache(userId: string): Promise<FeedCache | undefined> {
-  return idbGet<FeedCache>(cacheKey(userId))
+// --- The feed cache, read from and written to IndexedDB directly ------------
+//
+// The store is the single source of truth: `loadFeed` is the only way the UI
+// gets its data, and the write helpers are used only by the feed Worker.
+
+/** One account's cached feed. Rows are already scoped by the `by_user` index. */
+export async function loadFeed(userId: string): Promise<LoadedFeed> {
+  const [channels, videos, meta] = await Promise.all([
+    getRowsByUser<Channel>('channels', userId),
+    getRowsByUser<Video>('videos', userId),
+    getMeta(userId),
+  ])
+  return { channels, videos, feedFetchedAt: meta?.feedFetchedAt ?? 0 }
 }
 
-export async function saveCache(cache: FeedCache): Promise<void> {
-  await idbSet(cacheKey(cache.userId), cache)
+/** Cached video rows for one account, used to decide what to (re-)fetch. */
+export function loadVideos(userId: string): Promise<Video[]> {
+  return getRowsByUser<Video>('videos', userId)
+}
+
+/** Cached channel rows, read before a refresh to compare upload counts. */
+export function loadChannels(userId: string): Promise<Channel[]> {
+  return getRowsByUser<Channel>('channels', userId)
+}
+
+export function saveVideos(videos: Video[]): Promise<void> {
+  return putRows('videos', videos)
+}
+
+export function saveChannels(channels: Channel[]): Promise<void> {
+  return putRows('channels', channels)
+}
+
+export function markFetched(userId: string): Promise<void> {
+  return putMeta({ userId, feedFetchedAt: Date.now() })
+}
+
+/**
+ * Drop rows for channels the account no longer subscribes to. Run only once a
+ * refresh has succeeded: an interrupted run's picture of the account is
+ * incomplete, so it must not delete anything.
+ */
+export function pruneToSubscribed(userId: string, subscribed: Set<string>): Promise<void> {
+  return Promise.all([
+    pruneUserRows<Video>('videos', userId, (v) => subscribed.has(v.channelId)),
+    pruneUserRows<Channel>('channels', userId, (c) => subscribed.has(c.id)),
+  ]).then(() => undefined)
 }
 
 /** Clears one account's cache only; other accounts on this browser are kept. */
-export async function clearCache(userId: string): Promise<void> {
-  await idbDel(cacheKey(userId))
-}
-
-/**
- * Records are keyed per account, so in normal use this filters nothing; it
- * guards against a record left by an account-blind build showing one account's
- * feed to another.
- */
-export function rowsForUser<T extends { userId: string }>(rows: T[], userId: string): T[] {
-  return rows.filter((r) => r.userId === userId)
-}
-
-/**
- * Last-write-wins by id: rows the API returned again are updated in place, rows
- * it did not mention are kept. A refresh only ever adds to the cache, so history
- * already indexed is never re-fetched and never lost.
- */
-export function mergeVideos(cached: Video[], fresh: Video[]): Video[] {
-  const byId = new Map(cached.map((v) => [v.id, v]))
-  for (const v of fresh) byId.set(v.id, v)
-  return [...byId.values()]
-}
-
-/**
- * Same merge for channels. Unsubscribing must not delete the channel row, or
- * every cached video from it loses its avatar.
- */
-export function mergeChannels(cached: Channel[], fresh: Channel[]): Channel[] {
-  const byId = new Map(cached.map((c) => [c.id, c]))
-  for (const c of fresh) byId.set(c.id, c)
-  return [...byId.values()]
+export function clearFeed(userId: string): Promise<void> {
+  return clearUser(userId)
 }

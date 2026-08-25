@@ -12,9 +12,10 @@ interface Props {
 }
 
 /**
- * Memoized because VirtualGrid re-renders on every scroll event. All three props
- * are stable identities — `mergeVideos` keeps untouched rows and the channel map
- * is memoized — so the shallow compare bails rather than moving the cost around.
+ * Memoized because VirtualGrid re-renders on every scroll event. Between DB
+ * reads the feed state does not change, so the `video` row and the memoized
+ * channel map keep stable identities and the shallow compare bails rather than
+ * moving the cost around.
  */
 export const VideoCard = memo(function VideoCard({
   video,

@@ -1,20 +1,31 @@
-import { getAccessToken, invalidateToken } from './auth'
-import { Pacer } from './pacer'
-import {
-  CHANNEL_ITEMS_PER_SEC,
-  PAGES_PER_PLAYLIST,
-  VIDEO_ITEMS_PER_SEC,
-  VIDEO_ITEMS_PER_SEC_SOLO,
-  type Channel,
-  type Video,
-  type VideoKind,
-} from './types'
+import { PAGES_PER_PLAYLIST, type Channel, type Video, type VideoKind } from './types'
 
 const API = 'https://www.googleapis.com/youtube/v3'
 const DETAIL_CHUNK = 50
 
 /** Shorts may run up to 3 minutes (raised from 60s in October 2024). */
 const SHORTS_MAX_SEC = 180
+
+/**
+ * Supplies access tokens without this module depending on the browser-only auth
+ * code: the whole feed runs in a Worker, where `window` and Google Identity
+ * Services do not exist, so the token has to come from the main thread.
+ */
+export interface AuthBridge {
+  getToken(interactive: boolean): Promise<string>
+  invalidate(): void
+}
+
+let authBridge: AuthBridge | null = null
+
+export function setAuthBridge(bridge: AuthBridge): void {
+  authBridge = bridge
+}
+
+function auth(): AuthBridge {
+  if (!authBridge) throw new Error('Auth bridge not configured.')
+  return authBridge
+}
 
 export class YouTubeError extends Error {
   constructor(
@@ -27,7 +38,7 @@ export class YouTubeError extends Error {
 }
 
 async function apiGet<T>(path: string, params: Record<string, string>, retry = true): Promise<T> {
-  const token = await getAccessToken(false).catch(() => getAccessToken(true))
+  const token = await auth().getToken(false).catch(() => auth().getToken(true))
   const url = `${API}/${path}?${new URLSearchParams(params).toString()}`
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
 
@@ -40,7 +51,7 @@ async function apiGet<T>(path: string, params: Record<string, string>, retry = t
   const message = body.error?.message || res.statusText
 
   if (res.status === 401 && retry) {
-    invalidateToken()
+    auth().invalidate()
     return apiGet<T>(path, params, false)
   }
   if (res.status === 403 && (reason === 'quotaExceeded' || reason === 'dailyLimitExceeded')) {
@@ -96,6 +107,7 @@ interface SubscriptionItem {
     resourceId: { channelId: string }
     thumbnails?: Record<string, { url: string } | undefined>
   }
+  contentDetails?: { totalItemCount?: number }
 }
 
 export async function fetchSubscriptions(
@@ -107,7 +119,9 @@ export async function fetchSubscriptions(
 
   do {
     const page: ListResponse<SubscriptionItem> = await apiGet('subscriptions', {
-      part: 'snippet',
+      // `contentDetails` rides the same call at no extra quota cost and carries
+      // the upload count used to skip unchanged channels' playlist scans.
+      part: 'snippet,contentDetails',
       mine: 'true',
       maxResults: '50',
       order: 'alphabetical',
@@ -120,6 +134,7 @@ export async function fetchSubscriptions(
         userId,
         title: item.snippet.title,
         thumbnail: t?.medium?.url ?? t?.default?.url ?? '',
+        totalItemCount: item.contentDetails?.totalItemCount,
       })
     }
     onProgress?.(channels.length)
@@ -280,6 +295,8 @@ export async function fetchVideoDetails(refs: VideoRef[], userId: string): Promi
 
 export interface RefreshProgress {
   scanned: number
+  /** Channels whose scan was skipped because their upload count was unchanged. */
+  skipped: number
   channels: number
   /** Newly indexed videos delivered so far. */
   videos: number
@@ -296,29 +313,33 @@ export interface FeedResult {
   failed: { title: string; message: string }[]
 }
 
-// Sized so the pacer, not parallelism, limits throughput.
+// Bounded so a large subscription list cannot open unlimited sockets at once,
+// but otherwise the feed runs flat out: it lives in a Worker now, so its CPU
+// cost no longer competes with rendering and needs no artificial throttle.
 const CHANNEL_SCAN_CONCURRENCY = 8
-const DETAIL_WORKERS = 2
+const DETAIL_WORKERS = 32
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
- * Index the subscription feed at a deliberate pace, streaming results out as
- * they arrive. Channel scanning and detail fetching are a producer/consumer
- * pair, each drawing on half the budget until scanning finishes and the video
- * side takes the whole allowance.
+ * Index the subscription feed, streaming results out as they arrive. Channel
+ * scanning and detail fetching are a producer/consumer pair that run
+ * concurrently: consumers start draining discovered videos while scanning is
+ * still in progress.
  *
  * Discovered videos are routed into two queues: anything outside `knownIds` is
  * new and fetched first, anything in `staleIds` is cached but aged out and
- * re-read afterwards. Cached videos that are neither cost no budget.
+ * re-read afterwards. Cached videos that are neither cost no request.
  */
 export async function fetchFeed(
   channels: Channel[],
   userId: string,
   knownIds: Set<string>,
   staleIds: Set<string>,
+  /** Channel id -> the upload count from the previous refresh, if any. */
+  prevCounts: Map<string, number | undefined>,
   onProgress: (p: RefreshProgress) => void,
-  onVideos: (videos: Video[]) => void,
+  onVideos: (videos: Video[]) => void | Promise<void>,
 ): Promise<FeedResult> {
   const failed: { title: string; message: string }[] = []
   // Within-run dedupe only: the same video can appear in two channel scans.
@@ -326,23 +347,20 @@ export async function fetchFeed(
   const pending: VideoRef[] = []
   const stale: VideoRef[] = []
 
-  const channelPacer = new Pacer(CHANNEL_ITEMS_PER_SEC, 5, 5)
-  // Seeded with a full batch so the first videos appear immediately; the
-  // average still settles at the configured rate.
-  const videoPacer = new Pacer(VIDEO_ITEMS_PER_SEC, DETAIL_CHUNK, DETAIL_CHUNK)
-
   let scanned = 0
+  let skipped = 0
   let delivered = 0
   let updated = 0
   let scanningDone = false
-  // Refs off a queue but still waiting on the pacer: counted as neither queued
-  // nor delivered, the reported total dips while a batch waits for budget.
+  // Refs pulled off a queue and currently being fetched: counted as neither
+  // queued nor delivered, so the reported total dips while a batch is in flight.
   let inFlightNew = 0
   let inFlightStale = 0
 
   const report = () =>
     onProgress({
       scanned,
+      skipped,
       channels: channels.length,
       videos: delivered,
       updated,
@@ -351,7 +369,22 @@ export async function fetchFeed(
     })
 
   const produce = pool(channels, CHANNEL_SCAN_CONCURRENCY, async (channel) => {
-    await channelPacer.take(1)
+    // Skip the playlist scan when the channel's upload count is unchanged since
+    // the last refresh: no new uploads means nothing to discover, and the scan
+    // is the dominant per-refresh quota cost. A missing previous count — a first
+    // refresh, or a row cached before this field existed — counts as changed, so
+    // the channel is always scanned. The count is approximate and also moves for
+    // Shorts and deletions, so it can over-scan (harmless) but a delete-plus-post
+    // that nets zero can be missed until the next count change.
+    const prev = prevCounts.get(channel.id)
+    const unchanged =
+      prev !== undefined && channel.totalItemCount !== undefined && prev === channel.totalItemCount
+    if (unchanged) {
+      skipped++
+      scanned++
+      report()
+      return
+    }
     try {
       for (const ref of await fetchChannelRefs(channel.id)) {
         if (seen.has(ref.id)) continue
@@ -380,12 +413,11 @@ export async function fetchFeed(
       if (isNew) inFlightNew += batch.length
       else inFlightStale += batch.length
       report()
-      await videoPacer.take(batch.length)
       try {
         const videos = await fetchVideoDetails(batch, userId)
         if (isNew) delivered += videos.length
         else updated += videos.length
-        onVideos(videos)
+        await onVideos(videos)
       } catch (err) {
         failed.push({
           title: `${batch.length} videos`,
@@ -399,13 +431,12 @@ export async function fetchFeed(
     }
   }
 
-  // Several drainers share one bucket, so fetch latency cannot hold throughput
-  // below the configured rate.
+  // Several drainers run in parallel, so one slow request cannot stall the
+  // whole video side while others could be in flight.
   const consumers = Promise.all(Array.from({ length: DETAIL_WORKERS }, consume))
 
   await produce
   scanningDone = true
-  videoPacer.setRate(VIDEO_ITEMS_PER_SEC_SOLO)
   await consumers
 
   return { failed }
