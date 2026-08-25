@@ -51,3 +51,6 @@ coverage
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code local launch config (per-machine dev-server settings)
+.claude/launch.json

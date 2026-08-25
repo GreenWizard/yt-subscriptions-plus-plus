@@ -1,4 +1,4 @@
-import { PAGES_PER_PLAYLIST, type Channel, type Video, type VideoKind } from './types'
+import { type Channel, type Video, type VideoKind } from './types'
 
 const API = 'https://www.googleapis.com/youtube/v3'
 const DETAIL_CHUNK = 50
@@ -27,6 +27,20 @@ function auth(): AuthBridge {
   return authBridge
 }
 
+// Every list endpoint this module calls costs one quota unit, so a simple count
+// of API requests is the quota spent. Lives here because `apiGet` is the single
+// choke point every request passes through; the Worker reads it to persist and
+// report usage, and seeds it from the day's stored total on startup.
+let apiCalls = 0
+
+export function getApiCalls(): number {
+  return apiCalls
+}
+
+export function setApiCalls(n: number): void {
+  apiCalls = n
+}
+
 export class YouTubeError extends Error {
   constructor(
     message: string,
@@ -41,6 +55,9 @@ async function apiGet<T>(path: string, params: Record<string, string>, retry = t
   const token = await auth().getToken(false).catch(() => auth().getToken(true))
   const url = `${API}/${path}?${new URLSearchParams(params).toString()}`
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+  // Count every request that reaches the API — a failed call still spends quota.
+  // The 401 path retries via a recursive call, which counts that attempt too.
+  apiCalls++
 
   if (res.ok) return (await res.json()) as T
 
@@ -195,20 +212,21 @@ async function fetchPlaylistIds(id: string, maxPages: number): Promise<string[]>
 /**
  * The split playlists are undocumented, so a 404 on all of them falls back to
  * the combined `UU` uploads playlist.
+ *
+ * Only the first page (newest `maxPages`×50) is read: the auto-playlists are
+ * newest-first, so new uploads are always at the head, and a refresh only needs
+ * to discover what changed since the last one.
  */
-async function fetchChannelRefs(channelId: string): Promise<VideoRef[]> {
+async function fetchChannelRefs(channelId: string, maxPages = 1): Promise<VideoRef[]> {
   if (!channelId.startsWith('UC')) {
-    const ids = await fetchPlaylistIds(channelId, PAGES_PER_PLAYLIST)
+    const ids = await fetchPlaylistIds(channelId, maxPages)
     return ids.map((id) => ({ id, kind: null }))
   }
 
   const perKind = await Promise.all(
     PLAYLIST_KINDS.map(async (kind) => {
       try {
-        const ids = await fetchPlaylistIds(
-          playlistId(channelId, PLAYLIST_PREFIX[kind]),
-          PAGES_PER_PLAYLIST,
-        )
+        const ids = await fetchPlaylistIds(playlistId(channelId, PLAYLIST_PREFIX[kind]), maxPages)
         return ids.map((id): VideoRef => ({ id, kind }))
       } catch (err) {
         // A channel with no videos of this kind has no such playlist.
@@ -220,16 +238,22 @@ async function fetchChannelRefs(channelId: string): Promise<VideoRef[]> {
 
   // All of them missing means the prefixes did not apply to this channel.
   if (perKind.every((r) => r === null)) {
-    const ids = await fetchPlaylistIds(playlistId(channelId, 'UU'), PAGES_PER_PLAYLIST).catch(
-      (err) => {
-        if (err instanceof YouTubeError && err.status === 404) return [] as string[]
-        throw err
-      },
-    )
+    const ids = await fetchPlaylistIds(playlistId(channelId, 'UU'), maxPages).catch((err) => {
+      if (err instanceof YouTubeError && err.status === 404) return [] as string[]
+      throw err
+    })
     return ids.map((id) => ({ id, kind: null }))
   }
 
   return perKind.filter((r): r is VideoRef[] => r !== null).flat()
+}
+
+/**
+ * Every video ref from a channel — all playlist pages, not just the head. Used
+ * by the background backfill pass to index a channel's whole back catalogue.
+ */
+export function fetchAllVideoRefs(channelId: string): Promise<VideoRef[]> {
+  return fetchChannelRefs(channelId, Number.POSITIVE_INFINITY)
 }
 
 interface VideoItem {
@@ -294,23 +318,43 @@ export async function fetchVideoDetails(refs: VideoRef[], userId: string): Promi
 }
 
 export interface RefreshProgress {
+  /** Channels whose playlists have been read so far (of those needing a scan). */
   scanned: number
-  /** Channels whose scan was skipped because their upload count was unchanged. */
+  /** Channels skipped because their upload count was unchanged since last time. */
   skipped: number
+  /** Total subscribed channels this refresh covers. */
   channels: number
-  /** Newly indexed videos delivered so far. */
+  /** Newly indexed videos written so far. */
   videos: number
   /** Cached videos whose details were re-read and updated in place. */
   updated: number
-  /** Newly discovered videos still queued behind the pacing budget. */
+  /** Video ids discovered and still awaiting a details fetch. */
   queued: number
-  /** Cached videos still queued for a details refresh. */
-  queuedStale: number
 }
 
 export interface FeedResult {
   /** Channels whose scan failed; their videos are missing from this refresh. */
   failed: { title: string; message: string }[]
+  /**
+   * Channels whose scanned head page held only ids we had never seen. That means
+   * uploads have likely spilled past the single page the scan reads, so the
+   * channel should be re-indexed in full — its `isFullyUpdated` is dropped.
+   */
+  needsBackfill: Set<string>
+}
+
+/** Everything the scan stage needs, resolved by the Worker before the run. */
+export interface FeedScan {
+  /** Channels to actually read — new or with a changed upload count. */
+  channelsToScan: Channel[]
+  /** All subscribed channels, for progress reporting. */
+  totalChannels: number
+  /** Channels omitted from `channelsToScan` because they were unchanged. */
+  skipped: number
+  /** Ids already cached; a scanned id in here is a re-read candidate, not new. */
+  knownIds: Set<string>
+  /** Cached ids whose details have aged out and should be re-fetched. */
+  staleIds: Set<string>
 }
 
 // Bounded so a large subscription list cannot open unlimited sockets at once,
@@ -319,78 +363,63 @@ export interface FeedResult {
 const CHANNEL_SCAN_CONCURRENCY = 8
 const DETAIL_WORKERS = 32
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-
 /**
- * Index the subscription feed, streaming results out as they arrive. Channel
- * scanning and detail fetching are a producer/consumer pair that run
- * concurrently: consumers start draining discovered videos while scanning is
- * still in progress.
+ * Index the subscription feed in explicit stages:
  *
- * Discovered videos are routed into two queues: anything outside `knownIds` is
- * new and fetched first, anything in `staleIds` is cached but aged out and
- * re-read afterwards. Cached videos that are neither cost no request.
+ *   1. Scan — read the first page of each to-scan channel's playlists and
+ *      collect the video ids found (deduped across channels).
+ *   2. Filter — drop ids already cached whose details are still fresh; keep the
+ *      genuinely new ones and the cached-but-stale ones.
+ *   3. Details — fetch `videos.list` for the survivors in 50-id chunks and
+ *      stream each batch out via `onVideos`.
+ *
+ * Which channels to scan (new or changed upload count) and staleness are decided
+ * by the caller and arrive in `scan`; this function does not re-derive them.
  */
 export async function fetchFeed(
-  channels: Channel[],
+  scan: FeedScan,
   userId: string,
-  knownIds: Set<string>,
-  staleIds: Set<string>,
-  /** Channel id -> the upload count from the previous refresh, if any. */
-  prevCounts: Map<string, number | undefined>,
   onProgress: (p: RefreshProgress) => void,
   onVideos: (videos: Video[]) => void | Promise<void>,
 ): Promise<FeedResult> {
+  const { channelsToScan, totalChannels, skipped, knownIds, staleIds } = scan
   const failed: { title: string; message: string }[] = []
-  // Within-run dedupe only: the same video can appear in two channel scans.
-  const seen = new Set<string>()
-  const pending: VideoRef[] = []
-  const stale: VideoRef[] = []
+  const needsBackfill = new Set<string>()
 
   let scanned = 0
-  let skipped = 0
   let delivered = 0
   let updated = 0
-  let scanningDone = false
-  // Refs pulled off a queue and currently being fetched: counted as neither
-  // queued nor delivered, so the reported total dips while a batch is in flight.
-  let inFlightNew = 0
-  let inFlightStale = 0
+  let queued = 0
 
   const report = () =>
-    onProgress({
-      scanned,
-      skipped,
-      channels: channels.length,
-      videos: delivered,
-      updated,
-      queued: pending.length + inFlightNew,
-      queuedStale: stale.length + inFlightStale,
-    })
+    onProgress({ scanned, skipped, channels: totalChannels, videos: delivered, updated, queued })
 
-  const produce = pool(channels, CHANNEL_SCAN_CONCURRENCY, async (channel) => {
-    // Skip the playlist scan when the channel's upload count is unchanged since
-    // the last refresh: no new uploads means nothing to discover, and the scan
-    // is the dominant per-refresh quota cost. A missing previous count — a first
-    // refresh, or a row cached before this field existed — counts as changed, so
-    // the channel is always scanned. The count is approximate and also moves for
-    // Shorts and deletions, so it can over-scan (harmless) but a delete-plus-post
-    // that nets zero can be missed until the next count change.
-    const prev = prevCounts.get(channel.id)
-    const unchanged =
-      prev !== undefined && channel.totalItemCount !== undefined && prev === channel.totalItemCount
-    if (unchanged) {
-      skipped++
-      scanned++
-      report()
-      return
-    }
+  report()
+
+  // A playlist page holding only ids we have never cached means uploads have
+  // likely run past this single page, so the channel needs a full re-index.
+  const entirelyNew = (kindRefs: VideoRef[]) =>
+    kindRefs.length > 0 && kindRefs.every((r) => !knownIds.has(r.id))
+
+  // Stage 1: scan. Concurrent across channels; results merged, deduped by id.
+  const seen = new Set<string>()
+  const refs: VideoRef[] = []
+  await pool(channelsToScan, CHANNEL_SCAN_CONCURRENCY, async (channel) => {
     try {
-      for (const ref of await fetchChannelRefs(channel.id)) {
+      const channelRefs = await fetchChannelRefs(channel.id)
+      // Check each playlist page (long / live, or the combined fallback)
+      // separately: either being all-new is enough to trigger a re-index.
+      if (
+        entirelyNew(channelRefs.filter((r) => r.kind === 'long')) ||
+        entirelyNew(channelRefs.filter((r) => r.kind === 'live')) ||
+        entirelyNew(channelRefs.filter((r) => r.kind === null))
+      ) {
+        needsBackfill.add(channel.id)
+      }
+      for (const ref of channelRefs) {
         if (seen.has(ref.id)) continue
         seen.add(ref.id)
-        if (!knownIds.has(ref.id)) pending.push(ref)
-        else if (staleIds.has(ref.id)) stale.push(ref)
+        refs.push(ref)
       }
     } catch (err) {
       failed.push({ title: channel.title, message: err instanceof Error ? err.message : String(err) })
@@ -399,45 +428,33 @@ export async function fetchFeed(
     report()
   })
 
-  const consume = async () => {
-    for (;;) {
-      // New videos always win: re-reads wait until discovery is done and nothing
-      // new is left, so a refresh never delays fresh uploads.
-      const isNew = pending.length > 0
-      if (!isNew && (!scanningDone || stale.length === 0)) {
-        if (scanningDone && stale.length === 0) return
-        await sleep(100)
-        continue
+  // Stage 2: filter. A cached id is only refetched when its details have gone
+  // stale; anything not cached is new. Everything else costs no request.
+  const toFetch = refs.filter((r) => !knownIds.has(r.id) || staleIds.has(r.id))
+  queued = toFetch.length
+  report()
+
+  // Stage 3: details. Fetch in 50-id chunks, several chunks in flight at once.
+  const chunks: VideoRef[][] = []
+  for (let i = 0; i < toFetch.length; i += DETAIL_CHUNK) chunks.push(toFetch.slice(i, i + DETAIL_CHUNK))
+
+  await pool(chunks, DETAIL_WORKERS, async (chunk) => {
+    try {
+      const videos = await fetchVideoDetails(chunk, userId)
+      for (const v of videos) {
+        if (knownIds.has(v.id)) updated++
+        else delivered++
       }
-      const batch = (isNew ? pending : stale).splice(0, DETAIL_CHUNK)
-      if (isNew) inFlightNew += batch.length
-      else inFlightStale += batch.length
-      report()
-      try {
-        const videos = await fetchVideoDetails(batch, userId)
-        if (isNew) delivered += videos.length
-        else updated += videos.length
-        await onVideos(videos)
-      } catch (err) {
-        failed.push({
-          title: `${batch.length} videos`,
-          message: err instanceof Error ? err.message : String(err),
-        })
-      } finally {
-        if (isNew) inFlightNew -= batch.length
-        else inFlightStale -= batch.length
-      }
-      report()
+      await onVideos(videos)
+    } catch (err) {
+      failed.push({
+        title: `${chunk.length} videos`,
+        message: err instanceof Error ? err.message : String(err),
+      })
     }
-  }
+    queued -= chunk.length
+    report()
+  })
 
-  // Several drainers run in parallel, so one slow request cannot stall the
-  // whole video side while others could be in flight.
-  const consumers = Promise.all(Array.from({ length: DETAIL_WORKERS }, consume))
-
-  await produce
-  scanningDone = true
-  await consumers
-
-  return { failed }
+  return { failed, needsBackfill }
 }

@@ -11,6 +11,14 @@ export interface Channel {
    * which is treated as "changed" and forces a scan.
    */
   totalItemCount?: number
+  /**
+   * Whether the channel's entire back catalogue has been indexed by the
+   * background backfill pass (which reads every playlist page, not just the
+   * head). False/absent until that pass completes for the channel; the main
+   * refresh only ever reads the newest page, so history is filled in gradually
+   * across refreshes within a per-run quota budget.
+   */
+  isFullyUpdated?: boolean
 }
 
 /**

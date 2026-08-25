@@ -8,7 +8,15 @@ import { VirtualGrid } from './components/VirtualGrid'
 import { getAccessToken, getClientId, hasValidToken, invalidateToken, signOut } from './lib/auth'
 import type { FromWorker, ToWorker } from './lib/feed-protocol'
 import { applyRules, channelRows } from './lib/rules'
-import { clearFeed, getLastUserId, loadFeed, loadRules, saveRules, setLastUserId } from './lib/store'
+import {
+  clearFeed,
+  getLastUserId,
+  loadFeed,
+  loadQuotaUsed,
+  loadRules,
+  saveRules,
+  setLastUserId,
+} from './lib/store'
 import { type Channel, type FeedRules, type Video } from './lib/types'
 
 /**
@@ -55,6 +63,8 @@ export default function App() {
   const [failed, setFailed] = useState<{ title: string; message: string }[]>([])
   const [confirmingClear, setConfirmingClear] = useState(false)
   const [view, setView] = useState<View>('subscriptions')
+  // API calls used since the last quota reset (midnight PT), shown in the header.
+  const [apiUsed, setApiUsed] = useState<number | null>(null)
 
   // The account currently on screen, so a throttled DB read that resolves late
   // is dropped rather than painting a feed the user has switched away from.
@@ -101,6 +111,11 @@ export default function App() {
     shownUserRef.current = last
     void project(last).finally(() => setLoaded(true))
   }, [configured, project])
+
+  // Show today's API usage straight from the DB on load, before any refresh.
+  useEffect(() => {
+    void loadQuotaUsed().then(setApiUsed)
+  }, [])
 
   useEffect(() => saveRules(rules), [rules])
 
@@ -187,16 +202,26 @@ export default function App() {
         case 'subs-progress':
           setProgress(`Loading subscriptions… ${msg.count}`)
           break
+        case 'quota':
+          setApiUsed(msg.used)
+          break
+        case 'backfill-progress':
+          setProgress(
+            msg.remaining > 0
+              ? `Backfilling history · ${msg.remaining} channel${msg.remaining > 1 ? 's' : ''} left · ${msg.added} videos added…`
+              : `Backfilling history · ${msg.added} videos added…`,
+          )
+          break
         case 'feed-progress': {
           const p = msg.progress
           const queued = p.queued > 0 ? ` · ${p.queued} queued` : ''
           const unchanged = p.skipped > 0 ? ` (${p.skipped} unchanged)` : ''
-          if (p.scanned < p.channels) {
-            setProgress(`Scanning ${p.scanned}/${p.channels} channels${unchanged} · ${p.videos} new${queued}…`)
+          if (p.scanned + p.skipped < p.channels) {
+            setProgress(
+              `Scanning ${p.scanned + p.skipped}/${p.channels} channels${unchanged} · ${p.videos} new${queued}…`,
+            )
           } else if (p.queued > 0) {
-            setProgress(`Fetching new videos · ${p.videos} done${queued}…`)
-          } else if (p.queuedStale > 0) {
-            setProgress(`Refreshing details · ${p.updated} updated · ${p.queuedStale} to go…`)
+            setProgress(`Fetching videos · ${p.videos} new · ${p.updated} updated${queued}…`)
           } else {
             setProgress(`Finishing up · ${p.videos} new · ${p.updated} updated…`)
           }
@@ -207,11 +232,12 @@ export default function App() {
           break
         case 'done':
           setFailed(msg.failed)
-          // One final, immediate read: the worker has written everything and
-          // pruned unsubscribed rows, so this reflects the settled DB.
+          // One final, immediate read reflecting the settled DB — but only when
+          // the run actually changed it; otherwise what is on screen is current
+          // and a full re-read of the cache would be pure waste.
           if (readTimerRef.current) clearTimeout(readTimerRef.current)
           readTimerRef.current = null
-          if (runUser) void project(runUser).finally(cleanup)
+          if (runUser && msg.changed) void project(runUser).finally(cleanup)
           else cleanup()
           break
         case 'error':
@@ -280,6 +306,14 @@ export default function App() {
           ))}
         </nav>
         <div className="spacer" />
+        {apiUsed !== null && (
+          <span
+            className="control"
+            title="YouTube API units used since the last quota reset (midnight Pacific time). The default daily quota is 10,000."
+          >
+            {apiUsed.toLocaleString()} API
+          </span>
+        )}
         {videos.length > 0 && (
           <span className="control">
             {view === 'channels'

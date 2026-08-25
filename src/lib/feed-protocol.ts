@@ -26,9 +26,15 @@ export type FromWorker =
   | { kind: 'user'; id: string; title: string }
   | { kind: 'subs-progress'; count: number }
   | { kind: 'feed-progress'; progress: RefreshProgress }
+  // Cumulative API calls (≈ quota units) used so far in the current Pacific day.
+  | { kind: 'quota'; date: string; used: number }
+  // Background backfill pass: channels still awaiting full history, and videos
+  // it has added so far this run.
+  | { kind: 'backfill-progress'; remaining: number; added: number }
   // The DB has new rows for the current account; the main thread should re-read.
   | { kind: 'updated' }
-  // The run finished and its final state is already persisted (unsubscribed rows
-  // pruned). The main thread does one last read.
-  | { kind: 'done'; failed: { title: string; message: string }[] }
+  // The run finished and its final state is already persisted. `changed` says
+  // whether the run altered the DB (videos written or rows pruned); when false
+  // the main thread skips the final full re-read — what is on screen is current.
+  | { kind: 'done'; changed: boolean; failed: { title: string; message: string }[] }
   | { kind: 'error'; message: string }

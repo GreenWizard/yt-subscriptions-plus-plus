@@ -21,7 +21,6 @@
 // short-circuits auth, so the app runs with no Google account at all.
 
 import { setAuthBridge } from './youtube'
-import { PAGES_PER_PLAYLIST } from './types'
 
 const API_HOST = 'www.googleapis.com'
 
@@ -112,15 +111,25 @@ function thumb(hue: number, label: string): string {
 }
 
 function installFixtures(arg?: string): void {
-  const [c, v] = (arg ?? '10x30').split('x').map(Number)
-  const channelCount = Number.isFinite(c) && c > 0 ? c : 10
-  const videosPerChannel = Number.isFinite(v) && v > 0 ? v : 30
-  // playlistItems can only surface PAGE * PAGES_PER_PLAYLIST ids per playlist.
-  const maxVideos = PAGE * PAGES_PER_PLAYLIST
-  if (videosPerChannel > maxVideos) {
-    console.warn(`[feed-mock] videos/channel capped at ${maxVideos} (PAGES_PER_PLAYLIST=${PAGES_PER_PLAYLIST})`)
-  }
-  const perChannel = Math.min(videosPerChannel, maxVideos)
+  // `CxV[+NxM[lL]]`: C base channels with V long-form videos each, plus N extra
+  // channels (indices C..C+N-1) with M long-form videos and L live streams each.
+  // The extra group lets tests add "new" channels — with live playlists — on top
+  // of an unchanged base set.
+  const [baseSpec, extraSpec] = (arg ?? '10x30').split('+')
+  const [c, v] = baseSpec.split('x').map(Number)
+  const baseCount = Number.isFinite(c) && c > 0 ? c : 10
+  // Not capped: playlistItems here paginates through the whole count, so the
+  // backfill pass (which reads every page) has a full back catalogue to fetch.
+  const basePerChannel = Number.isFinite(v) && v > 0 ? v : 30
+
+  const em = extraSpec ? /^(\d+)x(\d+)(?:l(\d+))?$/.exec(extraSpec) : null
+  const extraCount = em ? Number(em[1]) : 0
+  const extraVideos = em ? Number(em[2]) : 0
+  const extraLive = em?.[3] ? Number(em[3]) : 0
+
+  const channelCount = baseCount + extraCount
+  const longCount = (i: number) => (i < baseCount ? basePerChannel : extraVideos)
+  const liveCount = (i: number) => (i < baseCount ? 0 : extraLive)
 
   // No round trip to the main thread / Google Identity Services: any string works
   // because the interceptor never validates the token.
@@ -165,25 +174,31 @@ function installFixtures(arg?: string): void {
           },
           // Upload count the scan-skip optimization diffs against. Deterministic,
           // so a second refresh sees it unchanged and skips the playlist scan.
-          contentDetails: { totalItemCount: perChannel },
+          contentDetails: { totalItemCount: longCount(i) + liveCount(i) },
         }
       })
       const next = offset + PAGE < channelCount ? String(offset + PAGE) : undefined
       return jsonResponse({ items: slice, ...(next ? { nextPageToken: next } : {}) })
     }
 
-    // playlistItems — long-form playlist per channel returns video ids; the live
-    // playlist 404s (no live videos), which apiGet tolerates per kind.
+    // playlistItems — the long-form playlist pages through the channel's videos;
+    // the live playlist serves live stream ids for extra channels that have any
+    // and 404s otherwise, which apiGet tolerates per kind.
     if (url.pathname.endsWith('/playlistItems')) {
       const playlistId = q.get('playlistId') ?? ''
-      if (playlistId.startsWith('UULV')) return errorResponse(404, 'Playlist not found.', 'playlistNotFound')
-      if (!playlistId.startsWith('UULF')) return errorResponse(404, 'Playlist not found.', 'playlistNotFound')
+      const isLivePl = playlistId.startsWith('UULV')
+      if (!isLivePl && !playlistId.startsWith('UULF')) {
+        return errorResponse(404, 'Playlist not found.', 'playlistNotFound')
+      }
       const chIdx = channelIndex('UC' + playlistId.slice(4))
+      const count = isLivePl ? liveCount(chIdx) : longCount(chIdx)
+      if (count === 0) return errorResponse(404, 'Playlist not found.', 'playlistNotFound')
       const offset = Number(q.get('pageToken') ?? 0)
-      const slice = Array.from({ length: Math.min(PAGE, perChannel - offset) }, (_, k) => ({
-        contentDetails: { videoId: `v_${chIdx}_${offset + k}` },
+      const prefix = isLivePl ? 'vl' : 'v'
+      const slice = Array.from({ length: Math.min(PAGE, count - offset) }, (_, k) => ({
+        contentDetails: { videoId: `${prefix}_${chIdx}_${offset + k}` },
       }))
-      const next = offset + PAGE < perChannel ? String(offset + PAGE) : undefined
+      const next = offset + PAGE < count ? String(offset + PAGE) : undefined
       return jsonResponse({ items: slice, ...(next ? { nextPageToken: next } : {}) })
     }
 
@@ -192,11 +207,12 @@ function installFixtures(arg?: string): void {
       const ids = (q.get('id') ?? '').split(',').filter(Boolean)
       const now = Date.now()
       const items = ids.map((id) => {
-        const [, ch, n] = id.split('_')
+        const [prefix, ch, n] = id.split('_')
+        const isLiveVideo = prefix === 'vl'
         const chIdx = Number(ch)
         const seq = Number(n)
-        // Every 5th video is a Short (<= 180s); the rest are long-form.
-        const durationSec = seq % 5 === 0 ? 45 : 600 + seq * 7
+        // Live streams run long; of the rest, every 5th video is a Short.
+        const durationSec = isLiveVideo ? 7200 : seq % 5 === 0 ? 45 : 600 + seq * 7
         const h = Math.floor(durationSec / 3600)
         const m = Math.floor((durationSec % 3600) / 60)
         const s = durationSec % 60
@@ -204,11 +220,11 @@ function installFixtures(arg?: string): void {
         return {
           id,
           snippet: {
-            title: `Channel ${chIdx} — video ${seq}`,
+            title: `Channel ${chIdx} — ${isLiveVideo ? 'stream' : 'video'} ${seq}`,
             channelId: channelId(chIdx),
             channelTitle: `Channel ${chIdx}`,
             // Spread uploads across recent days so ordering has something to work with.
-            publishedAt: new Date(now - (chIdx * perChannel + seq) * 3600_000).toISOString(),
+            publishedAt: new Date(now - (chIdx * longCount(chIdx) + seq) * 3600_000).toISOString(),
             thumbnails: { medium: { url: thumb((chIdx * 37 + seq * 11) % 360, `${chIdx}·${seq}`) } },
           },
           contentDetails: { duration },

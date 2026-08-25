@@ -1,4 +1,15 @@
-import { clearUser, getMeta, getRowsByUser, pruneUserRows, putMeta, putRows } from './idb'
+import {
+  clearUser,
+  getMeta,
+  getQuota,
+  getRowIdsByUser,
+  getRowsByUser,
+  getVideosPublishedSince,
+  pruneUserRows,
+  putMeta,
+  putQuota,
+  putRows,
+} from './idb'
 import {
   CHANNEL_SORT_KEYS,
   DEFAULT_RULES,
@@ -106,9 +117,14 @@ export async function loadFeed(userId: string): Promise<LoadedFeed> {
   return { channels, videos, feedFetchedAt: meta?.feedFetchedAt ?? 0 }
 }
 
-/** Cached video rows for one account, used to decide what to (re-)fetch. */
-export function loadVideos(userId: string): Promise<Video[]> {
-  return getRowsByUser<Video>('videos', userId)
+/** Cached video ids only — cheap even on a large store; no rows materialized. */
+export function loadVideoIds(userId: string): Promise<string[]> {
+  return getRowIdsByUser('videos', userId)
+}
+
+/** Cached videos published at or after `sinceIso`, the only staleness candidates. */
+export function loadVideosSince(userId: string, sinceIso: string): Promise<Video[]> {
+  return getVideosPublishedSince<Video>(userId, sinceIso)
 }
 
 /** Cached channel rows, read before a refresh to compare upload counts. */
@@ -143,4 +159,28 @@ export function pruneToSubscribed(userId: string, subscribed: Set<string>): Prom
 /** Clears one account's cache only; other accounts on this browser are kept. */
 export function clearFeed(userId: string): Promise<void> {
   return clearUser(userId)
+}
+
+// --- API quota counter ------------------------------------------------------
+//
+// The YouTube daily quota resets at midnight Pacific time, so usage is counted
+// against the Pacific calendar day. The counter is global (shared across every
+// account on this browser) because the quota belongs to the OAuth project.
+
+/** The current Pacific calendar day as `YYYY-MM-DD`, DST-correct via `Intl`. */
+export function pacificDay(ts: number = Date.now()): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(ts)
+}
+
+/**
+ * API calls used so far in the current quota day. A stored count from an earlier
+ * day reads as 0: that day's quota has already reset.
+ */
+export async function loadQuotaUsed(): Promise<number> {
+  const row = await getQuota()
+  return row && row.date === pacificDay() ? row.used : 0
+}
+
+export function saveQuota(date: string, used: number): Promise<void> {
+  return putQuota(date, used)
 }
