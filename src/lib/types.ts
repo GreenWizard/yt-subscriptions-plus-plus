@@ -42,6 +42,23 @@ export interface Video {
   kind: VideoKind
   /** Absent on rows cached before refreshing existed, which refreshes them first. */
   fetchedAt?: number
+  /**
+   * views/hour as of `fetchedAt`, computed when the row is written so the
+   * trending sort is a plain numeric sort. Slightly stale by design: videos
+   * young enough for their rate to still move are re-fetched by the metadata
+   * TTL anyway, and an old video's rate barely changes. Absent on rows cached
+   * before this field existed — the sort fills those in lazily.
+   */
+  viewsPerHour?: number
+  /**
+   * Lazy per-row caches (see rules.ts), filled on first use with `??=`. UI-only:
+   * the worker builds its own rows for the DB, so these never get persisted.
+   * Lowercasing 200k titles or parsing 200k dates on every keystroke/sort was
+   * the dominant cost of the search filter and the trending sort.
+   */
+  titleLc?: string
+  channelTitleLc?: string
+  publishedMs?: number
 }
 
 /**

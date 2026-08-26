@@ -445,6 +445,11 @@ export async function fetchVideoDetails(refs: VideoRef[], userId: string): Promi
       const t = item.snippet.thumbnails
       const durationSec = parseDuration(item.contentDetails.duration)
       const known = kindById.get(item.id) ?? null
+      const viewCount = Number(item.statistics?.viewCount ?? 0)
+      const ageHours = Math.max(
+        1,
+        (Date.now() - new Date(item.snippet.publishedAt).getTime()) / 3_600_000,
+      )
       return {
         id: item.id,
         userId,
@@ -454,7 +459,8 @@ export async function fetchVideoDetails(refs: VideoRef[], userId: string): Promi
         thumbnail: t?.medium?.url ?? t?.high?.url ?? t?.default?.url ?? '',
         publishedAt: item.snippet.publishedAt,
         durationSec,
-        viewCount: Number(item.statistics?.viewCount ?? 0),
+        viewCount,
+        viewsPerHour: viewCount / ageHours,
         isLive: item.snippet.liveBroadcastContent === 'live',
         // `UU` fallback only: nothing but duration distinguishes a Short there.
         kind: known ?? (durationSec > 0 && durationSec <= SHORTS_MAX_SEC ? 'short' : 'long'),

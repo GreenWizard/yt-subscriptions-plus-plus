@@ -37,11 +37,18 @@ function compareDate(a: Video, b: Video): number {
 }
 
 function ageHours(video: Video): number {
-  return Math.max(1, (Date.now() - new Date(video.publishedAt).getTime()) / 3_600_000)
+  const ms = (video.publishedMs ??= new Date(video.publishedAt).getTime())
+  return Math.max(1, (Date.now() - ms) / 3_600_000)
 }
 
+/**
+ * Normally read straight off the row: the worker computes the rate when it
+ * writes the video (see `fetchVideoDetails`). Computing it here is the fallback
+ * for rows cached before the field existed, cached on the row like the other
+ * lazy fields.
+ */
 export function viewsPerHour(video: Video): number {
-  return video.viewCount / ageHours(video)
+  return (video.viewsPerHour ??= video.viewCount / ageHours(video))
 }
 
 export function randomShuffleSeed(): number {
@@ -118,7 +125,11 @@ export function applyRules(videos: Video[], rules: FeedRules): Video[] {
     if (!inFeed(v)) return false
     if (from && v.publishedAt < from) return false
     if (to && v.publishedAt >= to) return false
-    if (needle && !v.title.toLowerCase().includes(needle) && !v.channelTitle.toLowerCase().includes(needle)) {
+    if (
+      needle &&
+      !(v.titleLc ??= v.title.toLowerCase()).includes(needle) &&
+      !(v.channelTitleLc ??= v.channelTitle.toLowerCase()).includes(needle)
+    ) {
       return false
     }
     return true
@@ -145,12 +156,14 @@ export function sortVideos(videos: Video[], sort: SortKey): Video[] {
   }
 }
 
-/** Decorated like the shuffle: the rate needs a parsed date, so parse once per video. */
+/**
+ * A plain numeric sort: the rate was computed when the row was written. One
+ * fill pass first, so the comparator never hits the lazy fallback's ~log n
+ * recomputations on pre-field rows.
+ */
 function byRate(videos: Video[]): Video[] {
-  return videos
-    .map((video) => ({ video, rate: viewsPerHour(video) }))
-    .sort((a, b) => b.rate - a.rate || compareDate(a.video, b.video))
-    .map((entry) => entry.video)
+  for (const video of videos) viewsPerHour(video)
+  return videos.sort((a, b) => b.viewsPerHour! - a.viewsPerHour! || compareDate(a, b))
 }
 
 export interface ChannelRow {

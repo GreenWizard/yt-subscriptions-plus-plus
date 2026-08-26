@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { ChannelList } from './components/ChannelList'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { ChannelControls, Controls } from './components/Controls'
@@ -30,8 +30,16 @@ import { FEED_PAGE_SIZE, type Channel, type FeedRules, type Video } from './lib/
  * repaint. During a run the worker writes rows continuously; this throttles the
  * main thread's re-reads so a burst of writes turns into at most one read per
  * window rather than one per batch. The final read on `done` is immediate.
+ *
+ * The window adapts to how expensive the last read was: reading a full 200k-row
+ * cache costs ~1.5s of deserialization, so a fixed short window spent ~20% of
+ * the main thread re-reading the store by the end of a cold run (measured as
+ * 200–280ms long tasks every cycle). Scaling the wait by the last read keeps
+ * repaints frequent while the cache is small and backs off as it grows,
+ * bounding the read's share of the main thread to roughly 1/READ_BACKOFF.
  */
-const DB_READ_MS = 500
+const DB_READ_MS = 300
+const READ_BACKOFF = 4
 
 /** Rebuilding a feed costs minutes of indexing, so the button is worth a pause. */
 const CLEAR_CONFIRM_SEC = 5
@@ -77,25 +85,30 @@ export default function App() {
   // Live for the duration of a run: the worker and the read-throttle timer.
   const workerRef = useRef<Worker | null>(null)
   const readTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Duration of the last DB read, driving the adaptive throttle window.
+  const lastReadMsRef = useRef(0)
 
   // Read one account's feed from the DB and paint it. This is the only path by
   // which feed data reaches the UI: the worker writes to the DB, never to state.
   const project = useCallback(async (uid: string) => {
+    const started = performance.now()
     const feed = await loadFeed(uid)
+    lastReadMsRef.current = performance.now() - started
     if (shownUserRef.current !== uid) return
     setChannels(feed.channels)
     setVideos(feed.videos)
   }, [])
 
-  // Throttle re-reads to at most one per window; a run writes far faster than the
-  // grid needs to repaint.
+  // Throttle re-reads to at most one per window; a run writes far faster than
+  // the grid needs to repaint, and the window grows with the cost of reading.
   const scheduleRead = useCallback(
     (uid: string) => {
       if (readTimerRef.current) return
+      const wait = Math.max(DB_READ_MS, READ_BACKOFF * lastReadMsRef.current)
       readTimerRef.current = setTimeout(() => {
         readTimerRef.current = null
         void project(uid)
-      }, DB_READ_MS)
+      }, wait)
     },
     [project],
   )
@@ -268,25 +281,35 @@ export default function App() {
 
   const channelsById = useMemo(() => new Map(channels.map((c) => [c.id, c])), [channels])
 
-  // Both views read one cache, but each is built only for the view on screen:
-  // `rules` is a single object, so any change to it is a new identity, and
-  // without the guard a keystroke in the channel filter re-sorted the whole
-  // video feed behind the view — a second of work on a 300k-video cache.
+  // The search box is controlled by `rules.query` and must echo a keystroke
+  // instantly; refiltering and resorting 200k videos costs ~150ms. Deferring the
+  // query that feeds the heavy memo lets React commit the input first and
+  // rebuild the list at deferred priority, so typing never blocks.
+  const deferredQuery = useDeferredValue(rules.query)
+
+  // Both views read one cache. Each memo keys on exactly the rule fields it
+  // consumes rather than the whole `rules` object, so a keystroke in one view's
+  // filter cannot invalidate the other view — and switching views costs only a
+  // render, since the hidden view's result is still cached.
   const visible = useMemo(
-    () => (view === 'subscriptions' ? applyRules(videos, rules) : []),
-    [view, videos, rules],
+    () => applyRules(videos, { ...rules, query: deferredQuery }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- applyRules reads only these rule fields
+    [videos, rules.sort, deferredQuery, rules.fromDate, rules.toDate, rules.mutedChannels],
   )
   const rows = useMemo(
-    () => (view === 'channels' ? channelRows(videos, channels, rules) : []),
-    [view, videos, channels, rules],
+    () => channelRows(videos, channels, rules),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- channelRows reads only these rule fields
+    [videos, channels, rules.channelQuery, rules.channelSort, rules.mutedChannels],
   )
 
-  // Rules changes rebuild the filtered feed, so the old page number and shuffle
-  // no longer point at the same items — snap back to the first page, unshuffled.
+  // Feed-rule changes rebuild the filtered feed, so the old page number and
+  // shuffle no longer point at the same items — snap back to the first page,
+  // unshuffled. Channel-view rules are deliberately absent: they never change
+  // what the feed pages over.
   useEffect(() => {
     setPage(0)
     setPageSeed(null)
-  }, [rules])
+  }, [rules.sort, rules.query, rules.fromDate, rules.toDate, rules.mutedChannels])
 
   // Clamped rather than reset when the feed shrinks under the current page
   // (e.g. a refresh pruning an unsubscribed channel mid-scroll).
