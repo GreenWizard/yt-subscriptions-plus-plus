@@ -16,16 +16,45 @@ never leave your machine.
 | Newest / Oldest first | Publish date. |
 | Most views | Absolute view count. |
 | Trending (views/hour) | Views divided by hours since publication — surfaces what is taking off right now instead of what is merely old and popular. |
-| Longest / Shortest first | Runtime. |
+
+**Shuffle page** re-deals the page on screen into a random order — it is a button, not a sort, so
+leaving the page or changing a rule un-shuffles.
 
 **Filtering**
 
 - **Release date** — inclusive from/to window, with presets, in your own timezone.
 - **Search** — substring match on video title or channel name.
+- **Tags** — pick any number of your channel tags; a Match switch chooses between *any* (OR) and
+  *all* (AND) semantics when several are selected.
+- **Muting** — a muted channel disappears from the feed but stays in the channels view, where
+  muting is undone.
 
 Shorts are not a filter: they are never fetched, so there is nothing to toggle.
 
 Rules persist in `localStorage`, so the feed opens the way you left it.
+
+**Channel tags**
+
+Label your subscriptions and filter the feed by those labels. Up to 10 tags per channel; every
+video inherits its channel's tags. Each tag wears one of 32 palette colors, with the chip text
+flipping between dark and light by the color's luminance. Tags are created, renamed, recolored and
+deleted in the **channels** view (where they are assigned), and live in IndexedDB next to the feed
+cache — per account, surviving refreshes and cache clears. Filtering stays flat-cost at feed
+scale: the selected tags collapse to one set of admitted channels, a single lookup per video even
+at 200k videos.
+
+**Channels view**
+
+One row per subscription — newest uploads, indexed count, latest-upload age — searchable and
+sortable by recency or name, with per-channel tag assignment and muting.
+
+**Mobile**
+
+The whole controls block slides away when scrolling down and returns on the first scroll up. The
+header never wraps: on narrow viewports the counters drop to their own row and the Refresh label
+becomes an icon. Rarely used actions (Clear cache, Sign out) sit in a ☰ menu in the corner. A
+running refresh can be cancelled by pressing the button again — everything already indexed stays
+cached.
 
 ## Setup
 
@@ -106,17 +135,21 @@ npm run typecheck
 ```
 src/
   lib/
-    auth.ts      Google Identity Services token flow (no client secret)
-    youtube.ts   YouTube Data API v3 client, quota-conscious feed assembly
-    rules.ts     Sorting and filtering — the actual "my own rules" logic
-    store.ts     Rule persistence and validation, IndexedDB feed cache, merges
-    idb.ts       ~50-line IndexedDB key/value helper, no dependencies
-    pacer.ts     Token bucket holding indexing to a deliberate rate
-    format.ts    Duration, view count, and relative age formatting
-    types.ts     Shared types, default rules, and the pacing budget
+    auth.ts           Google Identity Services token flow (no client secret)
+    youtube.ts        YouTube Data API v3 client, quota-conscious feed assembly
+    feed.worker.ts    The refresh itself, off the main thread; writes to IndexedDB
+    feed-protocol.ts  Messages between App and the worker
+    feed-mock.ts      Offline fixtures / API mocks for development and benchmarks
+    rules.ts          Sorting and filtering — the actual "my own rules" logic
+    store.ts          Rule persistence and validation, feed/tag cache access
+    idb.ts            Per-row IndexedDB store, no dependencies
+    format.ts         Duration, view count, and relative age formatting
+    types.ts          Shared types, default rules, tags, and tuning constants
   components/
     Setup.tsx         One-time OAuth client ID entry with instructions
-    Controls.tsx      Sort and filter bar
+    Controls.tsx      Sort and filter bars for both views
+    Tags.tsx          Tag filter row, manager panel, per-channel tag picker
+    ChannelList.tsx   The channels view: one row per subscription
     VirtualGrid.tsx   Mounts only the rows near the viewport
     ConfirmDialog.tsx Modal with a delay before its destructive button arms
     VideoCard.tsx
@@ -213,13 +246,10 @@ To deploy without Actions, build locally and publish `dist/` to a `gh-pages` bra
   that path are identified by the 3-minute ceiling and dropped from the feed, the one place a
   duration heuristic is still needed.
 - Channels whose scan fails are reported in the status bar rather than silently omitted.
-- Indexing is paced to 3000 items per minute, split evenly between channel scans and video
-  fetches (25/s each); once every channel is scanned, videos take the whole 50/s allowance.
-  Unpaced indexing saturated the network and main thread badly enough to make scrolling stutter.
-  Change `TOTAL_ITEMS_PER_MIN` in `src/lib/types.ts` to retune; the split and solo rates derive
-  from it.
-- Progress is checkpointed to IndexedDB every few seconds, so closing the tab mid-index keeps what
-  was already fetched; the next refresh resumes rather than re-requesting it.
+- Indexing runs in a Web Worker and writes to IndexedDB batch by batch, so closing the tab — or
+  pressing Cancel — mid-index keeps what was already fetched; the next refresh resumes rather
+  than re-requesting it. Unsubscribed channels are pruned only after a *completed* run, so an
+  interrupted one never deletes anything.
 - A cached video is re-requested only once its details are older than `METADATA_TTL_MS` (6h) and
   it was published within `METADATA_REFRESH_MAX_AGE_MS` (7 days), so view counts stay current
   without re-reading a whole back catalogue. Everything else in the cache costs nothing and is
