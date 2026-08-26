@@ -58,8 +58,13 @@ cached.
 
 ## Setup
 
-You need your own Google OAuth client ID. It is free, takes about five minutes, and is required
-because the app has no server to hold credentials for you.
+The site runs on GitHub Pages: fork this repository and every push to `main` deploys it through
+the bundled workflow (`.github/workflows/pages.yml`) to `https://<user>.github.io/<repo>/`.
+Hosting the page publicly shares the code, not your data — the feed cache stays in each
+visitor's own browser.
+
+You also need your own Google OAuth client ID. It is free, takes about five minutes, and is
+required because the app has no server to hold credentials for you.
 
 1. Create a project in the [Google Cloud Console](https://console.cloud.google.com/projectcreate).
 2. **APIs & Services → Library** → enable **YouTube Data API v3**.
@@ -73,12 +78,26 @@ because the app has no server to hold credentials for you.
    to 100 test users are allowed. Test authorizations expire after 7 days, so expect to pass
    through the consent screen again about once a week.
 6. **Google Auth Platform → Clients** → **Create client** → **Web application**. Under
-   **Authorized JavaScript origins** add both `http://localhost:5173` and `http://localhost` —
-   Google asks for the bare host as well as the port-specific origin when testing locally. Leave
-   **Authorized redirect URIs** empty; the Google Identity Services token flow does not use them.
+   **Authorized JavaScript origins** add `https://<user>.github.io` — origins carry no path, so
+   the bare `github.io` host of your account is the whole entry. (For local development, also add
+   `http://localhost:5173` and `http://localhost`; Google asks for the bare host as well as the
+   port-specific origin.) Leave **Authorized redirect URIs** empty; the Google Identity Services
+   token flow does not use them.
 7. Copy the client ID.
 
-Then:
+Then publish the site:
+
+1. Fork this repository.
+2. In the fork, open **Settings → Pages** and set **Source** to **GitHub Actions**.
+3. Push to `main` (or run the **Deploy to GitHub Pages** workflow manually). The URL appears on
+   the workflow run and under **Settings → Pages**.
+4. Open the page, allow popups for it (sign-in uses one), and paste your client ID into the
+   setup screen. The ID lives in your browser's `localStorage`, not in the repo — a client ID is
+   public by design, though anyone who copies yours shares your daily quota.
+
+Only Google accounts on your **Test users** list can sign in (see the note below).
+
+### Running locally
 
 ```bash
 npm install
@@ -155,82 +174,6 @@ src/
     VideoCard.tsx
   App.tsx        Refresh orchestration and layout
 ```
-
-## Deploying
-
-`npm run build` emits a fully static `dist/`, deployable to GitHub Pages, Vercel, Netlify, or any
-static host. Add the deployed origin to **Authorized JavaScript origins** under
-**Google Auth Platform → Clients → your client**, alongside the localhost entries.
-
-### GitHub Pages
-
-A project page is served from `https://<user>.github.io/<repo>/` — a subpath, not the origin
-root — so the build needs Vite's `--base` flag; everything else is the stock Pages/Actions flow.
-
-1. In the repository, open **Settings → Pages** and set **Source** to **GitHub Actions**.
-2. Commit this workflow as `.github/workflows/pages.yml`:
-
-   ```yaml
-   name: Deploy to GitHub Pages
-
-   on:
-     push:
-       branches: [main]
-     workflow_dispatch:
-
-   permissions:
-     contents: read
-     pages: write
-     id-token: write
-
-   concurrency:
-     group: pages
-     cancel-in-progress: true
-
-   jobs:
-     build:
-       runs-on: ubuntu-latest
-       steps:
-         - uses: actions/checkout@v4
-         - uses: actions/setup-node@v4
-           with:
-             node-version: 22
-             cache: npm
-         - run: npm ci
-         # --base makes asset URLs resolve under the /<repo>/ subpath.
-         - run: npm run build -- --base=/${{ github.event.repository.name }}/
-         - uses: actions/upload-pages-artifact@v3
-           with:
-             path: dist
-     deploy:
-       needs: build
-       runs-on: ubuntu-latest
-       environment:
-         name: github-pages
-         url: ${{ steps.deployment.outputs.page_url }}
-       steps:
-         - id: deployment
-           uses: actions/deploy-pages@v4
-   ```
-
-3. Push to `main`. The workflow builds `dist/` and publishes it; the URL appears on the
-   workflow run and under **Settings → Pages**.
-4. Add `https://<user>.github.io` to **Authorized JavaScript origins** on your OAuth client
-   (origins carry no path, so the bare `github.io` host of your account is the whole entry).
-   Also allow popups for that origin — sign-in still uses one.
-5. Open the page and paste your client ID into the setup screen, exactly as on localhost. The
-   ID is stored in your browser's `localStorage`, not in the repo. (Baking it in at build time
-   also works — define `VITE_GOOGLE_CLIENT_ID` as a repository **variable** and pass it in the
-   build step's `env` — but is only worth it if you are tired of the setup screen; a client ID
-   is public by design, though anyone who copies yours shares your daily quota.)
-
-Two things do not change from localhost: only Google accounts on the **Test users** list can
-sign in (see the note below), and the feed cache stays in each visitor's own browser — hosting
-the page publicly shares the code, not your data.
-
-To deploy without Actions, build locally and publish `dist/` to a `gh-pages` branch
-(`npx gh-pages -d dist` after building with the same `--base` flag), then point
-**Settings → Pages** at that branch — same result, just manual.
 
 ## Notes and limits
 
