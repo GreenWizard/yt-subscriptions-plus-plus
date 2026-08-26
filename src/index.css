@@ -335,6 +335,9 @@ input:focus, select:focus, button:focus-visible {
 
 .tag-edit { gap: 4px; }
 
+.tag-transfer { gap: 6px; }
+.tag-transfer-note { font-size: 12px; color: var(--muted); }
+
 .channel-tags {
   display: flex;
   flex-wrap: wrap;

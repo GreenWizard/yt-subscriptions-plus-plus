@@ -182,6 +182,11 @@ export function saveTag(tag: Tag): Promise<void> {
   return putRows('tags', [tag])
 }
 
+/** Batch upsert, used by the file import so many rows land in one transaction. */
+export function saveTags(tags: Tag[]): Promise<void> {
+  return putRows('tags', tags)
+}
+
 export function removeTag(userId: string, tagId: string): Promise<void> {
   return deleteRow('tags', userId, tagId)
 }

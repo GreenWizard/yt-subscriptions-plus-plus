@@ -18,8 +18,10 @@ import {
   removeTag,
   saveRules,
   saveTag,
+  saveTags,
   setLastUserId,
 } from './lib/store'
+import { mergeTags } from './lib/tag-transfer'
 import type { TagActions } from './components/Tags'
 import {
   FEED_PAGE_SIZE,
@@ -485,6 +487,17 @@ export default function App() {
         }))
       },
       onToggleChannel: toggleChannel,
+      onImport: (imported) => {
+        if (!userId) return null
+        const result = mergeTags(tags, imported, userId)
+        // One transaction for the whole file, then one state swap — importing
+        // a hundred tags must not mean a hundred renders and IDB commits.
+        if (result.changed.length > 0) {
+          void saveTags(result.changed)
+          setTags(result.tags)
+        }
+        return result
+      },
     }
   }, [tags, userId, channelTagCount, upsertTag])
 

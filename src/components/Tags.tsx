@@ -1,5 +1,11 @@
 import { useRef, useState, type CSSProperties, type SyntheticEvent } from 'react'
 import {
+  parseTagsFile,
+  serializeTags,
+  type PortableTag,
+  type TagMergeResult,
+} from '../lib/tag-transfer'
+import {
   DEFAULT_TAG_COLOR,
   MAX_TAGS_PER_CHANNEL,
   TAG_COLORS,
@@ -16,6 +22,8 @@ export interface TagActions {
   onDelete: (tagId: string) => void
   /** Assigns or unassigns one tag on one channel. */
   onToggleChannel: (tagId: string, channelId: string) => void
+  /** Merges tags parsed from an export file; null when no account is active. */
+  onImport: (imported: PortableTag[]) => TagMergeResult | null
 }
 
 const byName = (a: Tag, b: Tag) =>
@@ -127,6 +135,7 @@ export function TagManager({ tags, actions }: { tags: Tag[]; actions: TagActions
   return (
     <div className="controls-row tag-manager">
       <NewTagInput onCreate={(name) => actions.onCreate(name)} />
+      <TagTransfer tags={tags} onImport={actions.onImport} />
       {[...tags].sort(byName).map((tag) => (
         <span className="control tag-edit" key={tag.id}>
           <ColorPicker tag={tag} onPick={(color) => actions.onRecolor(tag.id, color)} />
@@ -196,6 +205,85 @@ function ColorPicker({ tag, onPick }: { tag: Tag; onPick: (color: string) => voi
         ))}
       </div>
     </details>
+  )
+}
+
+/**
+ * Export/import of the whole tag list as a JSON file — the one way to move
+ * tags to another browser or account. Export downloads a file; import merges
+ * one additively (see `mergeTags`) and reports what happened inline, since
+ * there is no toast infrastructure to report it anywhere else.
+ */
+function TagTransfer({
+  tags,
+  onImport,
+}: {
+  tags: Tag[]
+  onImport: TagActions['onImport']
+}) {
+  const fileRef = useRef<HTMLInputElement>(null)
+  const [note, setNote] = useState('')
+
+  const exportTags = () => {
+    const url = URL.createObjectURL(
+      new Blob([serializeTags(tags)], { type: 'application/json' }),
+    )
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `tags-${new Date().toISOString().slice(0, 10)}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const importFile = async (file: File) => {
+    try {
+      const result = onImport(parseTagsFile(await file.text()))
+      if (!result) return
+      const parts = [
+        result.created > 0 && `${result.created} new`,
+        result.merged > 0 && `${result.merged} updated`,
+        result.skippedAssignments > 0 &&
+          `${result.skippedAssignments} assignment${
+            result.skippedAssignments === 1 ? '' : 's'
+          } skipped (channel tag limit)`,
+      ].filter(Boolean)
+      setNote(parts.length > 0 ? `Imported: ${parts.join(', ')}.` : 'Nothing new to import.')
+    } catch (err) {
+      setNote(`Import failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  return (
+    <span className="control tag-transfer">
+      <button
+        className="chip"
+        onClick={exportTags}
+        disabled={tags.length === 0}
+        title="Download all tags and their channel assignments as a JSON file"
+      >
+        Export
+      </button>
+      <button
+        className="chip"
+        onClick={() => fileRef.current?.click()}
+        title="Merge tags from an exported JSON file into this account (adds, never removes)"
+      >
+        Import
+      </button>
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".json,application/json"
+        hidden
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          if (file) void importFile(file)
+          // Reset so re-picking the same file fires change again.
+          e.target.value = ''
+        }}
+      />
+      {note && <span className="tag-transfer-note">{note}</span>}
+    </span>
   )
 }
 
