@@ -1,9 +1,20 @@
-import { CHANNEL_SORT_LABELS, randomShuffleSeed, SORT_LABELS } from '../lib/rules'
+import { CHANNEL_SORT_LABELS, SORT_LABELS } from '../lib/rules'
 import type { ChannelSortKey, FeedRules, SortKey } from '../lib/types'
+
+/** Pagination of the filtered feed; rendered inside the sticky controls bar. */
+export interface Pager {
+  /** Zero-based current page. */
+  page: number
+  pageCount: number
+  onPage: (page: number) => void
+  /** Re-deals the page on screen (and only it) into a new random order. */
+  onShuffle: () => void
+}
 
 interface Props {
   rules: FeedRules
   onChange: (patch: Partial<FeedRules>) => void
+  pager?: Pager
 }
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -21,7 +32,7 @@ const DATE_PRESETS: { label: string; from: (now: Date) => Date }[] = [
   { label: 'This year', from: (n) => new Date(n.getFullYear(), 0, 1) },
 ]
 
-export function Controls({ rules, onChange }: Props) {
+export function Controls({ rules, onChange, pager }: Props) {
   return (
     <div className="controls">
       <div className="controls-row">
@@ -29,12 +40,7 @@ export function Controls({ rules, onChange }: Props) {
           Sort
           <select
             value={rules.sort}
-            onChange={(e) => {
-              const sort = e.target.value as SortKey
-              // Picking shuffle deals a new order; otherwise the persisted seed
-              // would return to the order shuffle was last left in.
-              onChange(sort === 'shuffle' ? { sort, shuffleSeed: randomShuffleSeed() } : { sort })
-            }}
+            onChange={(e) => onChange({ sort: e.target.value as SortKey })}
           >
             {(Object.keys(SORT_LABELS) as SortKey[]).map((key) => (
               <option key={key} value={key}>
@@ -44,10 +50,10 @@ export function Controls({ rules, onChange }: Props) {
           </select>
         </label>
 
-        {/* The only way to re-deal: the order is otherwise fixed by the seed. */}
-        {rules.sort === 'shuffle' && (
-          <button className="chip" onClick={() => onChange({ shuffleSeed: randomShuffleSeed() })}>
-            Shuffle again
+        {/* Shuffle is not a sort: it re-deals only the page on screen. */}
+        {pager && (
+          <button className="chip" onClick={pager.onShuffle}>
+            Shuffle page
           </button>
         )}
 
@@ -59,6 +65,26 @@ export function Controls({ rules, onChange }: Props) {
             onChange={(e) => onChange({ query: e.target.value })}
           />
         </label>
+
+        {pager && pager.pageCount > 1 && (
+          <span className="control pager">
+            <button
+              className="chip"
+              onClick={() => pager.onPage(pager.page - 1)}
+              disabled={pager.page <= 0}
+            >
+              ‹ Prev
+            </button>
+            Page {pager.page + 1} of {pager.pageCount}
+            <button
+              className="chip"
+              onClick={() => pager.onPage(pager.page + 1)}
+              disabled={pager.page >= pager.pageCount - 1}
+            >
+              Next ›
+            </button>
+          </span>
+        )}
       </div>
 
       <div className="controls-row">

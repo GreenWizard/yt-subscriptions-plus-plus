@@ -20,7 +20,7 @@
 // API (real auth still works). The fixtures scenario mocks everything and also
 // short-circuits auth, so the app runs with no Google account at all.
 
-import { setAuthBridge } from './youtube'
+import { decodePageToken, encodePageToken, setAuthBridge } from './youtube'
 
 const API_HOST = 'www.googleapis.com'
 
@@ -111,25 +111,31 @@ function thumb(hue: number, label: string): string {
 }
 
 function installFixtures(arg?: string): void {
-  // `CxV[+NxM[lL]]`: C base channels with V long-form videos each, plus N extra
-  // channels (indices C..C+N-1) with M long-form videos and L live streams each.
-  // The extra group lets tests add "new" channels — with live playlists — on top
-  // of an unchanged base set.
-  const [baseSpec, extraSpec] = (arg ?? '10x30').split('+')
-  const [c, v] = baseSpec.split('x').map(Number)
-  const baseCount = Number.isFinite(c) && c > 0 ? c : 10
+  // `CxV[lL][+CxV[lL]…]`: any number of channel groups, each C channels with V
+  // long-form videos (and optionally L live streams) apiece, laid out at
+  // consecutive indices. Groups let tests grow the subscription list — a spec
+  // extended with another `+CxV` adds "new" channels while every channel from
+  // the shorter spec keeps its exact ids and counts.
+  const groups = (arg ?? '10x30')
+    .split('+')
+    .map((g) => /^(\d+)x(\d+)(?:l(\d+))?$/.exec(g))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map((m) => ({ count: Number(m[1]), videos: Number(m[2]), live: m[3] ? Number(m[3]) : 0 }))
   // Not capped: playlistItems here paginates through the whole count, so the
   // backfill pass (which reads every page) has a full back catalogue to fetch.
-  const basePerChannel = Number.isFinite(v) && v > 0 ? v : 30
+  if (groups.length === 0) groups.push({ count: 10, videos: 30, live: 0 })
 
-  const em = extraSpec ? /^(\d+)x(\d+)(?:l(\d+))?$/.exec(extraSpec) : null
-  const extraCount = em ? Number(em[1]) : 0
-  const extraVideos = em ? Number(em[2]) : 0
-  const extraLive = em?.[3] ? Number(em[3]) : 0
-
-  const channelCount = baseCount + extraCount
-  const longCount = (i: number) => (i < baseCount ? basePerChannel : extraVideos)
-  const liveCount = (i: number) => (i < baseCount ? 0 : extraLive)
+  const channelCount = groups.reduce((sum, g) => sum + g.count, 0)
+  const groupOf = (i: number) => {
+    let start = 0
+    for (const g of groups) {
+      if (i < start + g.count) return g
+      start += g.count
+    }
+    return groups[groups.length - 1]
+  }
+  const longCount = (i: number) => groupOf(i).videos
+  const liveCount = (i: number) => groupOf(i).live
 
   // No round trip to the main thread / Google Identity Services: any string works
   // because the interceptor never validates the token.
@@ -161,9 +167,13 @@ function installFixtures(arg?: string): void {
       return jsonResponse({ items: [{ id: USER_ID, snippet: { title: 'Fixture User' } }] })
     }
 
-    // subscriptions — C channels, 50 per page.
+    // subscriptions — C channels, 50 per page. Tokens use the real API's
+    // base64-protobuf offset encoding so the parallel page-guessing path is
+    // exercised exactly as it would be against Google.
     if (url.pathname.endsWith('/subscriptions')) {
-      const offset = Number(q.get('pageToken') ?? 0)
+      const raw = q.get('pageToken')
+      const offset = raw ? decodePageToken(raw) : 0
+      if (!Number.isFinite(offset)) return errorResponse(400, 'Invalid page token.', 'invalidPageToken')
       const slice = Array.from({ length: Math.min(PAGE, channelCount - offset) }, (_, k) => {
         const i = offset + k
         return {
@@ -177,7 +187,7 @@ function installFixtures(arg?: string): void {
           contentDetails: { totalItemCount: longCount(i) + liveCount(i) },
         }
       })
-      const next = offset + PAGE < channelCount ? String(offset + PAGE) : undefined
+      const next = offset + PAGE < channelCount ? encodePageToken(offset + PAGE) : undefined
       return jsonResponse({ items: slice, ...(next ? { nextPageToken: next } : {}) })
     }
 
@@ -195,8 +205,12 @@ function installFixtures(arg?: string): void {
       if (count === 0) return errorResponse(404, 'Playlist not found.', 'playlistNotFound')
       const offset = Number(q.get('pageToken') ?? 0)
       const prefix = isLivePl ? 'vl' : 'v'
+      // Newest-first like the real auto-playlists: position 0 is the highest
+      // sequence number, so raising a channel's count adds a NEW id at the head
+      // (where a refresh's single-page scan will see it) instead of an old one
+      // at the tail.
       const slice = Array.from({ length: Math.min(PAGE, count - offset) }, (_, k) => ({
-        contentDetails: { videoId: `${prefix}_${chIdx}_${offset + k}` },
+        contentDetails: { videoId: `${prefix}_${chIdx}_${count - 1 - (offset + k)}` },
       }))
       const next = offset + PAGE < count ? String(offset + PAGE) : undefined
       return jsonResponse({ items: slice, ...(next ? { nextPageToken: next } : {}) })
@@ -223,8 +237,12 @@ function installFixtures(arg?: string): void {
             title: `Channel ${chIdx} — ${isLiveVideo ? 'stream' : 'video'} ${seq}`,
             channelId: channelId(chIdx),
             channelTitle: `Channel ${chIdx}`,
-            // Spread uploads across recent days so ordering has something to work with.
-            publishedAt: new Date(now - (chIdx * longCount(chIdx) + seq) * 3600_000).toISOString(),
+            // Spread uploads across recent days so ordering has something to
+            // work with. Higher sequence = newer, matching the reversed
+            // newest-first playlist order above.
+            publishedAt: new Date(
+              now - (chIdx * longCount(chIdx) + (longCount(chIdx) - seq)) * 3600_000,
+            ).toISOString(),
             thumbnails: { medium: { url: thumb((chIdx * 37 + seq * 11) % 360, `${chIdx}·${seq}`) } },
           },
           contentDetails: { duration },

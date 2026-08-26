@@ -12,9 +12,6 @@ export const SORT_LABELS: Record<SortKey, string> = {
   oldest: 'Oldest first',
   views: 'Most views',
   viewsPerHour: 'Trending (views/hour)',
-  longest: 'Longest first',
-  shortest: 'Shortest first',
-  shuffle: 'Shuffle',
 }
 
 export const CHANNEL_SORT_LABELS: Record<ChannelSortKey, string> = {
@@ -55,9 +52,8 @@ export function randomShuffleSeed(): number {
  * Where one video lands in the shuffle: the seed mixed with the video id (FNV-1a
  * plus an avalanche step, so neighbouring seeds do not give neighbouring
  * orders). Hashing rather than dealing a permutation keeps the order a property
- * of the video itself, so it survives filtering — a search narrowing the feed
- * does not move what is left, and a refresh drops new videos into the existing
- * order rather than re-dealing it.
+ * of the video itself, so the same seed gives the same order even if the page's
+ * membership shifts under a refresh.
  */
 function shuffleRank(id: string, seed: number): number {
   let h = seed >>> 0
@@ -69,8 +65,12 @@ function shuffleRank(id: string, seed: number): number {
   return (h ^ (h >>> 16)) >>> 0
 }
 
-/** Ranks are computed once per video, not inside the comparator's ~log n calls. */
-function shuffled(videos: Video[], seed: number): Video[] {
+/**
+ * Random-but-stable order for the on-screen feed page (shuffling is a per-page
+ * button now, not a sort). Ranks are computed once per video, not inside the
+ * comparator's ~log n calls.
+ */
+export function shuffled(videos: Video[], seed: number): Video[] {
   return videos
     .map((video) => ({ video, rank: shuffleRank(video.id, seed) }))
     // Two ids can hash to the same 32-bit rank, and `sort` is only stable with
@@ -102,6 +102,11 @@ function isoBound(day: string, nextDay: boolean): string {
   return d.toISOString().slice(0, -1)
 }
 
+/**
+ * Every filter runs before any sort: filtering is O(n) per rule while sorting
+ * is O(n log n), so the sort must only ever see the survivors. `filter`
+ * allocates the fresh array the in-place sort then works on.
+ */
 export function applyRules(videos: Video[], rules: FeedRules): Video[] {
   const muted = new Set(rules.mutedChannels)
   const needle = rules.query.trim().toLowerCase()
@@ -119,11 +124,12 @@ export function applyRules(videos: Video[], rules: FeedRules): Video[] {
     return true
   })
 
-  return sortVideos(filtered, rules.sort, rules.shuffleSeed)
+  return sortVideos(filtered, rules.sort)
 }
 
-export function sortVideos(videos: Video[], sort: SortKey, shuffleSeed: number): Video[] {
-  const sorted = [...videos]
+/** Sorts `videos` in place; callers pass an array they own (see `applyRules`). */
+export function sortVideos(videos: Video[], sort: SortKey): Video[] {
+  const sorted = videos
   switch (sort) {
     case 'oldest':
       return sorted.sort((a, b) => -compareDate(a, b))
@@ -131,12 +137,6 @@ export function sortVideos(videos: Video[], sort: SortKey, shuffleSeed: number):
       return sorted.sort((a, b) => b.viewCount - a.viewCount || compareDate(a, b))
     case 'viewsPerHour':
       return byRate(sorted)
-    case 'longest':
-      return sorted.sort((a, b) => b.durationSec - a.durationSec || compareDate(a, b))
-    case 'shortest':
-      return sorted.sort((a, b) => a.durationSec - b.durationSec || compareDate(a, b))
-    case 'shuffle':
-      return shuffled(sorted, shuffleSeed)
     // The `default` is not dead: the value can come from persisted state, and
     // falling out of the switch returns `undefined`, which blanks the app.
     case 'newest':
@@ -216,11 +216,12 @@ export function channelRows(
   return sortChannelRows([...rows.values()], rules.channelSort)
 }
 
+/** Sorts in place, like `sortVideos`: rows arrive freshly filtered and owned. */
 export function sortChannelRows(rows: ChannelRow[], sort: ChannelSortKey): ChannelRow[] {
   const byName = (a: ChannelRow, b: ChannelRow) =>
     a.channel.title.localeCompare(b.channel.title, undefined, { sensitivity: 'base' })
 
-  const sorted = [...rows]
+  const sorted = rows
   switch (sort) {
     case 'name':
       return sorted.sort(byName)

@@ -44,16 +44,13 @@ export interface Video {
   fetchedAt?: number
 }
 
-/** Runtime list, because `loadRules` has to validate persisted values against it. */
-export const SORT_KEYS = [
-  'newest',
-  'oldest',
-  'views',
-  'viewsPerHour',
-  'longest',
-  'shortest',
-  'shuffle',
-] as const
+/**
+ * Runtime list, because `loadRules` has to validate persisted values against it.
+ * `longest`/`shortest`/`shuffle` used to be sorts; a persisted value naming one
+ * of them now falls back to the default. Shuffling lives on as a button that
+ * re-deals only the feed page on screen.
+ */
+export const SORT_KEYS = ['newest', 'oldest', 'views', 'viewsPerHour'] as const
 
 export type SortKey = (typeof SORT_KEYS)[number]
 
@@ -72,13 +69,6 @@ export interface FeedRules {
   mutedChannels: string[]
   channelSort: ChannelSortKey
   channelQuery: string
-  /**
-   * Seeds the `shuffle` order. The order must be a pure function of the seed
-   * rather than of call time: the feed is re-sorted on every keystroke and every
-   * streamed batch, so a comparator reading `Math.random()` would re-deal the
-   * grid under the viewer mid-scroll.
-   */
-  shuffleSeed: number
 }
 
 export const DEFAULT_RULES: FeedRules = {
@@ -89,8 +79,14 @@ export const DEFAULT_RULES: FeedRules = {
   mutedChannels: [],
   channelSort: 'recent',
   channelQuery: '',
-  shuffleSeed: 0,
 }
+
+/**
+ * The feed is split into pages of this many videos: a 200k-video grid is far
+ * past what anyone scrolls through, and pages bound both the render slice and
+ * what the page-scoped shuffle has to re-deal.
+ */
+export const FEED_PAGE_SIZE = 10_000
 
 /** Videos read per playlist per channel on a refresh (50 per API call). */
 export const PAGES_PER_PLAYLIST = 2

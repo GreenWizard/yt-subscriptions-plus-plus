@@ -82,7 +82,7 @@ async function apiGet<T>(path: string, params: Record<string, string>, retry = t
 }
 
 /** Run tasks with a bounded number in flight, preserving result order. */
-async function pool<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+export async function pool<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length)
   let cursor = 0
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
@@ -118,6 +118,51 @@ export async function fetchCurrentUser(): Promise<CurrentUser> {
   return { id: me.id, title: me.snippet?.title ?? 'You' }
 }
 
+/**
+ * List-endpoint page tokens are base64 of a tiny protobuf `{1: offset, 2: 0}`
+ * (e.g. offset 50 → `CDIQAA`), so the token for any page is computable from its
+ * offset. That is what lets a refresh guess every subscriptions page up front
+ * and fetch them in parallel. The format is undocumented, so every guessed
+ * page is verified against the previous page's real `nextPageToken` and the
+ * chain falls back to sequential fetching from the first mismatch.
+ */
+export function encodePageToken(offset: number): string {
+  const bytes = [0x08]
+  let v = offset >>> 0
+  for (;;) {
+    const b = v & 0x7f
+    v >>>= 7
+    if (v) bytes.push(b | 0x80)
+    else {
+      bytes.push(b)
+      break
+    }
+  }
+  bytes.push(0x10, 0x00)
+  return btoa(String.fromCharCode(...bytes)).replace(/=+$/, '')
+}
+
+/** Inverse of `encodePageToken`; NaN when the token is not offset-shaped. */
+export function decodePageToken(token: string): number {
+  try {
+    const bin = atob(token)
+    if (bin.charCodeAt(0) !== 0x08) return NaN
+    let v = 0
+    let shift = 0
+    for (let i = 1; i < bin.length; i++) {
+      const b = bin.charCodeAt(i)
+      v |= (b & 0x7f) << shift
+      shift += 7
+      if (!(b & 0x80)) break
+    }
+    return v
+  } catch {
+    return NaN
+  }
+}
+
+const SUBS_PAGE = 50
+
 interface SubscriptionItem {
   snippet: {
     title: string
@@ -127,23 +172,33 @@ interface SubscriptionItem {
   contentDetails?: { totalItemCount?: number }
 }
 
+/**
+ * @param expectedCount Channel count from the previous refresh's cache. When
+ * known, every page's token is predicted from its offset and all pages are
+ * fetched in parallel instead of chaining one round-trip per 50 channels. Each
+ * page is verified against the previous page's real `nextPageToken`; from the
+ * first mismatch (or a shrunk/grown list) the fetch continues sequentially, so
+ * the result is always exactly what token-chaining would have returned.
+ */
 export async function fetchSubscriptions(
   userId: string,
   onProgress?: (count: number) => void,
+  expectedCount?: number,
 ): Promise<Channel[]> {
   const channels: Channel[] = []
-  let pageToken: string | undefined
 
-  do {
-    const page: ListResponse<SubscriptionItem> = await apiGet('subscriptions', {
+  const fetchPage = (pageToken?: string): Promise<ListResponse<SubscriptionItem>> =>
+    apiGet('subscriptions', {
       // `contentDetails` rides the same call at no extra quota cost and carries
       // the upload count used to skip unchanged channels' playlist scans.
       part: 'snippet,contentDetails',
       mine: 'true',
-      maxResults: '50',
+      maxResults: String(SUBS_PAGE),
       order: 'alphabetical',
       ...(pageToken ? { pageToken } : {}),
     })
+
+  const absorb = (page: ListResponse<SubscriptionItem>): void => {
     for (const item of page.items ?? []) {
       const t = item.snippet.thumbnails
       channels.push({
@@ -155,8 +210,41 @@ export async function fetchSubscriptions(
       })
     }
     onProgress?.(channels.length)
-    pageToken = page.nextPageToken
-  } while (pageToken)
+  }
+
+  // `undefined` means the first page; `null` means the chain is finished.
+  let pageToken: string | undefined | null = undefined
+
+  const predictedPages = expectedCount ? Math.ceil(expectedCount / SUBS_PAGE) : 0
+  if (predictedPages >= 2) {
+    const tokens = Array.from({ length: predictedPages }, (_, i) =>
+      i === 0 ? undefined : encodePageToken(i * SUBS_PAGE),
+    )
+    const results = await Promise.allSettled(tokens.map((t) => fetchPage(t)))
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i]
+      if (r.status === 'rejected') {
+        // The first page failing is a real error; a later page failing just
+        // means the guess was wrong — resume from the last verified token.
+        if (i === 0) throw r.reason
+        break
+      }
+      absorb(r.value)
+      pageToken = r.value.nextPageToken ?? null
+      // The list ended here (it may have shrunk): later guessed pages are
+      // unverifiable, so they are discarded even though they were fetched.
+      if (pageToken === null) break
+      // The guess held only if the real next token is the page already fetched;
+      // otherwise resume sequentially from the real token.
+      if (pageToken !== (i + 1 < tokens.length ? tokens[i + 1] : null)) break
+    }
+  }
+
+  while (pageToken !== null) {
+    const page = await fetchPage(pageToken)
+    absorb(page)
+    pageToken = page.nextPageToken ?? null
+  }
 
   return channels
 }

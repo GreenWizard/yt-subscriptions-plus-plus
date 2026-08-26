@@ -7,7 +7,7 @@ import { VideoCard } from './components/VideoCard'
 import { VirtualGrid } from './components/VirtualGrid'
 import { getAccessToken, getClientId, hasValidToken, invalidateToken, signOut } from './lib/auth'
 import type { FromWorker, ToWorker } from './lib/feed-protocol'
-import { applyRules, channelRows } from './lib/rules'
+import { applyRules, channelRows, randomShuffleSeed, shuffled } from './lib/rules'
 import {
   clearFeed,
   getLastUserId,
@@ -17,7 +17,7 @@ import {
   saveRules,
   setLastUserId,
 } from './lib/store'
-import { type Channel, type FeedRules, type Video } from './lib/types'
+import { FEED_PAGE_SIZE, type Channel, type FeedRules, type Video } from './lib/types'
 
 /**
  * Streamed batches are buffered and folded into React state on this interval
@@ -63,6 +63,11 @@ export default function App() {
   const [failed, setFailed] = useState<{ title: string; message: string }[]>([])
   const [confirmingClear, setConfirmingClear] = useState(false)
   const [view, setView] = useState<View>('subscriptions')
+  // Feed pagination. The page is not persisted — it is navigation, like `view`.
+  // `pageSeed` orders the current page randomly when set; it is per page and
+  // per rules, so leaving the page or changing a filter/sort un-shuffles.
+  const [page, setPage] = useState(0)
+  const [pageSeed, setPageSeed] = useState<number | null>(null)
   // API calls used since the last quota reset (midnight PT), shown in the header.
   const [apiUsed, setApiUsed] = useState<number | null>(null)
 
@@ -276,6 +281,40 @@ export default function App() {
     [view, videos, channels, rules],
   )
 
+  // Rules changes rebuild the filtered feed, so the old page number and shuffle
+  // no longer point at the same items — snap back to the first page, unshuffled.
+  useEffect(() => {
+    setPage(0)
+    setPageSeed(null)
+  }, [rules])
+
+  // Clamped rather than reset when the feed shrinks under the current page
+  // (e.g. a refresh pruning an unsubscribed channel mid-scroll).
+  const pageCount = Math.max(1, Math.ceil(visible.length / FEED_PAGE_SIZE))
+  const currentPage = Math.min(page, pageCount - 1)
+
+  const pageItems = useMemo(() => {
+    const slice =
+      visible.length > FEED_PAGE_SIZE
+        ? visible.slice(currentPage * FEED_PAGE_SIZE, (currentPage + 1) * FEED_PAGE_SIZE)
+        : visible
+    return pageSeed === null ? slice : shuffled(slice, pageSeed)
+  }, [visible, currentPage, pageSeed])
+
+  const pager = useMemo(
+    () => ({
+      page: currentPage,
+      pageCount,
+      onPage: (p: number) => {
+        setPage(Math.max(0, Math.min(p, pageCount - 1)))
+        setPageSeed(null)
+        window.scrollTo(0, 0)
+      },
+      onShuffle: () => setPageSeed(randomShuffleSeed()),
+    }),
+    [currentPage, pageCount],
+  )
+
   const toggleMute = useCallback((channelId: string) => {
     setRules((prev) => ({
       ...prev,
@@ -359,7 +398,7 @@ export default function App() {
         {view === 'channels' ? (
           <ChannelControls rules={rules} onChange={updateRules} />
         ) : (
-          <Controls rules={rules} onChange={updateRules} />
+          <Controls rules={rules} onChange={updateRules} pager={pager} />
         )}
       </div>
 
@@ -431,7 +470,7 @@ export default function App() {
         )
       ) : visible.length > 0 ? (
         <VirtualGrid
-          items={visible}
+          items={pageItems}
           renderItem={(v) => (
             <VideoCard
               key={v.id}

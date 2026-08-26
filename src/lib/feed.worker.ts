@@ -24,6 +24,7 @@ import {
   fetchSubscriptions,
   fetchVideoDetails,
   getApiCalls,
+  pool,
   setApiCalls,
   setAuthBridge,
 } from './youtube'
@@ -33,6 +34,12 @@ import {
 // Overridable via env so tests can exercise the cutoff without 6000 real calls.
 const BACKFILL_QUOTA_LIMIT = Number(import.meta.env.VITE_BACKFILL_LIMIT ?? 6000)
 const DETAIL_CHUNK = 50
+
+// Channels backfilled at once, and detail batches in flight per channel. Both
+// bounded: the budget check runs between calls, so total overshoot past the
+// quota limit stays within (channels × details) calls.
+const BACKFILL_CHANNEL_CONCURRENCY = 6
+const BACKFILL_DETAIL_CONCURRENCY = 8
 
 // `self` is a DedicatedWorkerGlobalScope, but the project's tsconfig ships the
 // DOM lib rather than WebWorker, so pin down just the surface we use.
@@ -120,7 +127,13 @@ async function run(): Promise<void> {
   // Stage 1: channels. Fetch the current list, persist it, and drop any the
   // account unsubscribed from since last time — the fetched list is complete, so
   // whatever is missing from it is gone.
-  const subs = await fetchSubscriptions(me.id, (count) => post({ kind: 'subs-progress', count }))
+  // The cached channel count predicts how many subscription pages exist, which
+  // lets them be fetched in parallel instead of chained one by one.
+  const subs = await fetchSubscriptions(
+    me.id,
+    (count) => post({ kind: 'subs-progress', count }),
+    prevChannels.length,
+  )
   const subscribed = new Set(subs.map((c) => c.id))
   // Carry isFullyUpdated forward; the fetched rows do not include it, so without
   // this every refresh would reset it and the backfill pass would never finish.
@@ -192,34 +205,49 @@ async function run(): Promise<void> {
 
   // Backfill: once the main refresh is done, fill in each not-yet-fully-indexed
   // channel's entire back catalogue — all playlist pages, not just the head —
-  // one channel at a time, until the day's quota budget is spent. Marking a
-  // channel done only after its videos are written means an interrupted run
-  // simply retries it next time.
+  // until the day's quota budget is spent. Channels run several at a time and a
+  // channel's detail chunks are pooled too; only each channel's playlist pages
+  // stay sequential, since their tokens chain (and `totalItemCount` counts
+  // Shorts the long-form playlist omits, so page counts cannot be predicted the
+  // way subscription pages are). Marking a channel done only after its videos
+  // are written means an interrupted run simply retries it next time.
   const currentUsed = () => quotaBase + getApiCalls()
   const pending = subs.filter((c) => !c.isFullyUpdated)
   let backfilled = 0
   let added = 0
-  for (const channel of pending) {
-    if (currentUsed() >= BACKFILL_QUOTA_LIMIT) break
-    post({ kind: 'backfill-progress', remaining: pending.length - backfilled, added })
+  // One flag for every worker: the budget is shared, so the first worker to see
+  // it spent stops the whole pass, not just its own channel.
+  let outOfBudget = false
+  post({ kind: 'backfill-progress', remaining: pending.length, added })
+  await pool(pending, BACKFILL_CHANNEL_CONCURRENCY, async (channel) => {
+    if (outOfBudget || currentUsed() >= BACKFILL_QUOTA_LIMIT) {
+      outOfBudget = true
+      return
+    }
     try {
       const refs = await fetchAllVideoRefs(channel.id)
       const toFetch = refs.filter((r) => !known.has(r.id) || stale.has(r.id))
-      // Re-check between detail batches: a channel with a deep back catalogue can
-      // otherwise blow far past the budget mid-channel. On a cutoff the channel
-      // keeps isFullyUpdated=false and its fetched-so-far videos; the next run's
-      // ref fetch filters those out as known, so it resumes where it stopped.
+      const chunks: (typeof toFetch)[] = []
+      for (let i = 0; i < toFetch.length; i += DETAIL_CHUNK) chunks.push(toFetch.slice(i, i + DETAIL_CHUNK))
+      // Re-check between detail batches: a channel with a deep back catalogue
+      // can otherwise blow far past the budget mid-channel. On a cutoff the
+      // channel keeps isFullyUpdated=false and its fetched-so-far videos; the
+      // next run's ref fetch filters those out as known, so it resumes where
+      // it stopped.
       let cutOff = false
-      for (let i = 0; i < toFetch.length; i += DETAIL_CHUNK) {
-        if (currentUsed() >= BACKFILL_QUOTA_LIMIT) {
+      await pool(chunks, BACKFILL_DETAIL_CONCURRENCY, async (chunk) => {
+        if (cutOff || currentUsed() >= BACKFILL_QUOTA_LIMIT) {
           cutOff = true
-          break
+          return
         }
-        const videos = await fetchVideoDetails(toFetch.slice(i, i + DETAIL_CHUNK), me.id)
+        const videos = await fetchVideoDetails(chunk, me.id)
         added += videos.length
         await saveBatch(videos)
+      })
+      if (cutOff) {
+        outOfBudget = true
+        return
       }
-      if (cutOff) break
       channel.isFullyUpdated = true
       await saveChannels([channel])
     } catch (err) {
@@ -231,7 +259,7 @@ async function run(): Promise<void> {
     }
     backfilled++
     post({ kind: 'backfill-progress', remaining: pending.length - backfilled, added })
-  }
+  })
 
   await markFetched(me.id)
   await flushQuota(true)

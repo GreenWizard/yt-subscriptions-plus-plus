@@ -60,13 +60,6 @@ function dateString(value: unknown): string {
   return Number.isNaN(new Date(`${value}T00:00:00`).getTime()) ? '' : value
 }
 
-/** Only an unsigned 32-bit int is meaningful to `shuffleRank`'s mixing. */
-function shuffleSeed(value: unknown): number {
-  return typeof value === 'number' && Number.isInteger(value) && value >>> 0 === value
-    ? value
-    : DEFAULT_RULES.shuffleSeed
-}
-
 /**
  * Every field is untrusted: it may have been written by an older build or edited
  * by hand. An unrecognized `sort` reached `sortVideos`, which returned
@@ -91,7 +84,6 @@ export function loadRules(): FeedRules {
         : DEFAULT_RULES.mutedChannels,
       channelSort: channelSortKey(s.channelSort),
       channelQuery: typeof s.channelQuery === 'string' ? s.channelQuery : DEFAULT_RULES.channelQuery,
-      shuffleSeed: shuffleSeed(s.shuffleSeed),
     }
   } catch {
     return DEFAULT_RULES
