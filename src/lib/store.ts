@@ -1,5 +1,6 @@
 import {
   clearUser,
+  deleteRow,
   getMeta,
   getQuota,
   getRowIdsByUser,
@@ -14,10 +15,13 @@ import {
   CHANNEL_SORT_KEYS,
   DEFAULT_RULES,
   SORT_KEYS,
+  TAG_MODES,
   type Channel,
   type ChannelSortKey,
   type FeedRules,
   type SortKey,
+  type Tag,
+  type TagMode,
   type Video,
 } from './types'
 
@@ -42,6 +46,10 @@ export interface LoadedFeed {
 
 function sortKey(value: unknown): SortKey {
   return (SORT_KEYS as readonly unknown[]).includes(value) ? (value as SortKey) : DEFAULT_RULES.sort
+}
+
+function tagMode(value: unknown): TagMode {
+  return (TAG_MODES as readonly unknown[]).includes(value) ? (value as TagMode) : DEFAULT_RULES.tagMode
 }
 
 function channelSortKey(value: unknown): ChannelSortKey {
@@ -82,6 +90,12 @@ export function loadRules(): FeedRules {
       mutedChannels: Array.isArray(s.mutedChannels)
         ? s.mutedChannels.filter((c): c is string => typeof c === 'string')
         : DEFAULT_RULES.mutedChannels,
+      // Ids of tags since deleted are harmless — the filter drops unknown ids —
+      // but they are pruned on the next tag deletion anyway (see App).
+      selectedTags: Array.isArray(s.selectedTags)
+        ? s.selectedTags.filter((t): t is string => typeof t === 'string')
+        : DEFAULT_RULES.selectedTags,
+      tagMode: tagMode(s.tagMode),
       channelSort: channelSortKey(s.channelSort),
       channelQuery: typeof s.channelQuery === 'string' ? s.channelQuery : DEFAULT_RULES.channelQuery,
     }
@@ -151,6 +165,25 @@ export function pruneToSubscribed(userId: string, subscribed: Set<string>): Prom
 /** Clears one account's cache only; other accounts on this browser are kept. */
 export function clearFeed(userId: string): Promise<void> {
   return clearUser(userId)
+}
+
+// --- Tags -------------------------------------------------------------------
+//
+// Tags are user curation, not cache: the refresh worker never touches them and
+// clearing the feed cache leaves them in place (channel assignments point at
+// channel ids, which come back with the next refresh).
+
+export function loadTags(userId: string): Promise<Tag[]> {
+  return getRowsByUser<Tag>('tags', userId)
+}
+
+/** Insert or update one tag row (create, rename and assignment all land here). */
+export function saveTag(tag: Tag): Promise<void> {
+  return putRows('tags', [tag])
+}
+
+export function removeTag(userId: string, tagId: string): Promise<void> {
+  return deleteRow('tags', userId, tagId)
 }
 
 // --- API quota counter ------------------------------------------------------

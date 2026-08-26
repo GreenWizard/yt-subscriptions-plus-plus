@@ -1,11 +1,14 @@
 import { memo, type ReactNode } from 'react'
 import { formatAge } from '../lib/format'
 import type { ChannelRow } from '../lib/rules'
-import type { Video } from '../lib/types'
+import type { Tag, Video } from '../lib/types'
+import { ChannelTagPicker, type TagActions } from './Tags'
 import { VirtualGrid } from './VirtualGrid'
 
 interface Props {
   rows: ChannelRow[]
+  tags: Tag[]
+  tagActions: TagActions
   onToggleMute: (channelId: string) => void
   renderVideo: (video: Video) => ReactNode
 }
@@ -16,7 +19,7 @@ interface Props {
  * the commit that opens the view. `content-visibility` does not help — it skips
  * layout and paint, but mounting is what costs.
  */
-export function ChannelList({ rows, onToggleMute, renderVideo }: Props) {
+export function ChannelList({ rows, tags, tagActions, onToggleMute, renderVideo }: Props) {
   return (
     <VirtualGrid
       items={rows}
@@ -26,6 +29,8 @@ export function ChannelList({ rows, onToggleMute, renderVideo }: Props) {
         <ChannelRowView
           key={row.channel.id}
           row={row}
+          tags={tags}
+          tagActions={tagActions}
           onToggleMute={onToggleMute}
           renderVideo={renderVideo}
         />
@@ -37,10 +42,14 @@ export function ChannelList({ rows, onToggleMute, renderVideo }: Props) {
 /** Memoized like `VideoCard`: virtualizing re-renders the list on every scroll. */
 const ChannelRowView = memo(function ChannelRowView({
   row,
+  tags,
+  tagActions,
   onToggleMute,
   renderVideo,
 }: {
   row: ChannelRow
+  tags: Tag[]
+  tagActions: TagActions
   onToggleMute: (channelId: string) => void
   renderVideo: (video: Video) => ReactNode
 }) {
@@ -58,6 +67,8 @@ const ChannelRowView = memo(function ChannelRowView({
           )}
           <span className="channel-name">{channel.title}</span>
         </a>
+
+        <ChannelTagPicker channelId={channel.id} tags={tags} actions={tagActions} />
 
         <span className="channel-stats">
           {videoCount === 0

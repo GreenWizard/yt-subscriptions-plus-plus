@@ -1,5 +1,6 @@
 import { CHANNEL_SORT_LABELS, SORT_LABELS } from '../lib/rules'
-import type { ChannelSortKey, FeedRules, SortKey } from '../lib/types'
+import type { ChannelSortKey, FeedRules, SortKey, Tag } from '../lib/types'
+import { TagFilterRow, type TagActions } from './Tags'
 
 /** Pagination of the filtered feed; rendered inside the sticky controls bar. */
 export interface Pager {
@@ -15,6 +16,8 @@ interface Props {
   rules: FeedRules
   onChange: (patch: Partial<FeedRules>) => void
   pager?: Pager
+  tags?: Tag[]
+  tagActions?: TagActions
 }
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -32,7 +35,7 @@ const DATE_PRESETS: { label: string; from: (now: Date) => Date }[] = [
   { label: 'This year', from: (n) => new Date(n.getFullYear(), 0, 1) },
 ]
 
-export function Controls({ rules, onChange, pager }: Props) {
+export function Controls({ rules, onChange, pager, tags, tagActions }: Props) {
   return (
     <div className="controls">
       <div className="controls-row">
@@ -131,6 +134,10 @@ export function Controls({ rules, onChange, pager }: Props) {
           Reset
         </button>
       </div>
+
+      {tags && tagActions && (
+        <TagFilterRow tags={tags} rules={rules} onChange={onChange} actions={tagActions} />
+      )}
     </div>
   )
 }

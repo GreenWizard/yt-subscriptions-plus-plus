@@ -4,10 +4,10 @@
 // can read one account's rows back to render. This store is the single source
 // of truth: the Worker only writes here, the UI only reads from here.
 const DB_NAME = 'ytd'
-const DB_VERSION = 4
+const DB_VERSION = 5
 
 /** Stores of [userId, id]-keyed rows. */
-export type RowStore = 'videos' | 'channels'
+export type RowStore = 'videos' | 'channels' | 'tags'
 
 export interface Meta {
   userId: string
@@ -36,7 +36,9 @@ function openDb(): Promise<IDBDatabase> {
       const req = indexedDB.open(DB_NAME, DB_VERSION)
       req.onupgradeneeded = (event) => {
         const db = req.result
-        for (const name of ['videos', 'channels'] as const) {
+        // v5 adds `tags`. Tag rows are user curation, not cache: the refresh
+        // worker never writes them and `clearUser` leaves them alone.
+        for (const name of ['videos', 'channels', 'tags'] as const) {
           if (!db.objectStoreNames.contains(name)) {
             const store = db.createObjectStore(name, { keyPath: ['userId', 'id'] })
             store.createIndex('by_user', 'userId', { unique: false })
@@ -119,6 +121,20 @@ export function putRows<T>(store: RowStore, rows: T[]): Promise<void> {
         const tx = db.transaction(store, 'readwrite')
         const os = tx.objectStore(store)
         for (const row of rows) os.put(row)
+        tx.oncomplete = () => resolve()
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+      }),
+  )
+}
+
+/** Delete one row by its compound key. Deleting a missing key is a no-op. */
+export function deleteRow(store: RowStore, userId: string, id: string): Promise<void> {
+  return openDb().then(
+    (db) =>
+      new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(store, 'readwrite')
+        tx.objectStore(store).delete([userId, id])
         tx.oncomplete = () => resolve()
         tx.onerror = () => reject(tx.error)
         tx.onabort = () => reject(tx.error)

@@ -7,17 +7,29 @@ import { VideoCard } from './components/VideoCard'
 import { VirtualGrid } from './components/VirtualGrid'
 import { getAccessToken, getClientId, hasValidToken, invalidateToken, signOut } from './lib/auth'
 import type { FromWorker, ToWorker } from './lib/feed-protocol'
-import { applyRules, channelRows, randomShuffleSeed, shuffled } from './lib/rules'
+import { applyRules, channelRows, randomShuffleSeed, shuffled, tagFilterChannels } from './lib/rules'
 import {
   clearFeed,
   getLastUserId,
   loadFeed,
   loadQuotaUsed,
   loadRules,
+  loadTags,
+  removeTag,
   saveRules,
+  saveTag,
   setLastUserId,
 } from './lib/store'
-import { FEED_PAGE_SIZE, type Channel, type FeedRules, type Video } from './lib/types'
+import type { TagActions } from './components/Tags'
+import {
+  FEED_PAGE_SIZE,
+  MAX_TAGS_PER_CHANNEL,
+  TAG_COLORS,
+  type Channel,
+  type FeedRules,
+  type Tag,
+  type Video,
+} from './lib/types'
 
 /**
  * Streamed batches are buffered and folded into React state on this interval
@@ -63,6 +75,7 @@ export default function App() {
   const [userId, setUserId] = useState<string | null>(null)
   const [channels, setChannels] = useState<Channel[]>([])
   const [videos, setVideos] = useState<Video[]>([])
+  const [tags, setTags] = useState<Tag[]>([])
   const [loaded, setLoaded] = useState(false)
   const [rules, setRules] = useState<FeedRules>(loadRules)
   const [busy, setBusy] = useState(false)
@@ -134,6 +147,19 @@ export default function App() {
   useEffect(() => {
     void loadQuotaUsed().then(setApiUsed)
   }, [])
+
+  // Tags are read once per account, not on the worker's read-throttle path:
+  // only the UI below writes them, so state and DB cannot drift mid-run.
+  useEffect(() => {
+    if (!userId) return
+    let stale = false
+    void loadTags(userId).then((rows) => {
+      if (!stale) setTags(rows)
+    })
+    return () => {
+      stale = true
+    }
+  }, [userId])
 
   useEffect(() => saveRules(rules), [rules])
 
@@ -291,10 +317,17 @@ export default function App() {
   // consumes rather than the whole `rules` object, so a keystroke in one view's
   // filter cannot invalidate the other view — and switching views costs only a
   // render, since the hidden view's result is still cached.
+  // The selected tags collapse to a Set of admitted channels once, outside the
+  // per-video filter, and only when the tag rows or the selection change.
+  const tagChannels = useMemo(
+    () => tagFilterChannels(tags, rules.selectedTags, rules.tagMode),
+    [tags, rules.selectedTags, rules.tagMode],
+  )
+
   const visible = useMemo(
-    () => applyRules(videos, { ...rules, query: deferredQuery }),
+    () => applyRules(videos, { ...rules, query: deferredQuery }, tagChannels),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- applyRules reads only these rule fields
-    [videos, rules.sort, deferredQuery, rules.fromDate, rules.toDate, rules.mutedChannels],
+    [videos, rules.sort, deferredQuery, rules.fromDate, rules.toDate, rules.mutedChannels, tagChannels],
   )
   const rows = useMemo(
     () => channelRows(videos, channels, rules),
@@ -309,7 +342,7 @@ export default function App() {
   useEffect(() => {
     setPage(0)
     setPageSeed(null)
-  }, [rules.sort, rules.query, rules.fromDate, rules.toDate, rules.mutedChannels])
+  }, [rules.sort, rules.query, rules.fromDate, rules.toDate, rules.mutedChannels, tagChannels])
 
   // Clamped rather than reset when the feed shrinks under the current page
   // (e.g. a refresh pruning an unsubscribed channel mid-scroll).
@@ -337,6 +370,90 @@ export default function App() {
     }),
     [currentPage, pageCount],
   )
+
+  // --- Tag CRUD. Each action writes the row to IDB and mirrors it in state;
+  // the worker never touches the tags store, so state is the only other copy.
+
+  const upsertTag = useCallback((tag: Tag) => {
+    void saveTag(tag)
+    setTags((prev) => {
+      const i = prev.findIndex((t) => t.id === tag.id)
+      return i === -1 ? [...prev, tag] : prev.map((t) => (t.id === tag.id ? tag : t))
+    })
+  }, [])
+
+  /** Tags a channel already carries; the per-channel cap counts these. */
+  const channelTagCount = useCallback(
+    (channelId: string) => tags.filter((t) => t.channelIds.includes(channelId)).length,
+    [tags],
+  )
+
+  const tagActions = useMemo<TagActions>(() => {
+    const toggleChannel = (tagId: string, channelId: string) => {
+      const tag = tags.find((t) => t.id === tagId)
+      if (!tag) return
+      const assigned = tag.channelIds.includes(channelId)
+      if (!assigned && channelTagCount(channelId) >= MAX_TAGS_PER_CHANNEL) return
+      upsertTag({
+        ...tag,
+        channelIds: assigned
+          ? tag.channelIds.filter((id) => id !== channelId)
+          : [...tag.channelIds, channelId],
+      })
+    }
+
+    return {
+      onCreate: (name, channelId) => {
+        if (!userId) return
+        const trimmed = name.trim()
+        if (!trimmed) return
+        // Names are unique per account (case-insensitively): creating an
+        // existing name from a channel's picker assigns that tag instead.
+        const existing = tags.find((t) => t.name.toLowerCase() === trimmed.toLowerCase())
+        if (existing) {
+          if (channelId && !existing.channelIds.includes(channelId)) {
+            toggleChannel(existing.id, channelId)
+          }
+          return
+        }
+        if (channelId && channelTagCount(channelId) >= MAX_TAGS_PER_CHANNEL) return
+        upsertTag({
+          id: crypto.randomUUID(),
+          userId,
+          name: trimmed,
+          // Walk the palette so fresh tags start distinct; the picker can
+          // change it to any of the 32 afterwards.
+          color: TAG_COLORS[tags.length % TAG_COLORS.length],
+          channelIds: channelId ? [channelId] : [],
+        })
+      },
+      onRename: (tagId, name) => {
+        const tag = tags.find((t) => t.id === tagId)
+        const trimmed = name.trim()
+        if (!tag || !trimmed || trimmed === tag.name) return
+        // A rename onto an existing name is dropped rather than merged.
+        if (tags.some((t) => t.id !== tagId && t.name.toLowerCase() === trimmed.toLowerCase()))
+          return
+        upsertTag({ ...tag, name: trimmed })
+      },
+      onRecolor: (tagId, color) => {
+        const tag = tags.find((t) => t.id === tagId)
+        if (!tag || !(TAG_COLORS as readonly string[]).includes(color)) return
+        upsertTag({ ...tag, color })
+      },
+      onDelete: (tagId) => {
+        if (!userId) return
+        void removeTag(userId, tagId)
+        setTags((prev) => prev.filter((t) => t.id !== tagId))
+        // Also drop it from the persisted filter selection.
+        setRules((prev) => ({
+          ...prev,
+          selectedTags: prev.selectedTags.filter((id) => id !== tagId),
+        }))
+      },
+      onToggleChannel: toggleChannel,
+    }
+  }, [tags, userId, channelTagCount, upsertTag])
 
   const toggleMute = useCallback((channelId: string) => {
     setRules((prev) => ({
@@ -421,7 +538,7 @@ export default function App() {
         {view === 'channels' ? (
           <ChannelControls rules={rules} onChange={updateRules} />
         ) : (
-          <Controls rules={rules} onChange={updateRules} pager={pager} />
+          <Controls rules={rules} onChange={updateRules} pager={pager} tags={tags} tagActions={tagActions} />
         )}
       </div>
 
@@ -467,6 +584,8 @@ export default function App() {
         rows.length > 0 ? (
           <ChannelList
             rows={rows}
+            tags={tags}
+            tagActions={tagActions}
             onToggleMute={toggleMute}
             renderVideo={(v) => (
               <VideoCard

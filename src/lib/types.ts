@@ -22,6 +22,45 @@ export interface Channel {
 }
 
 /**
+ * A user-defined label attached to channels. Tags live in their own IDB store
+ * (the worker rewrites channel rows wholesale on every refresh, so anything
+ * stored on the channel row would be lost), and carry their channel assignments
+ * with them: filtering by tags then reduces to Set lookups on `channelId`.
+ * Videos have no tag data of their own — they inherit their channel's tags.
+ */
+export interface Tag {
+  id: string
+  userId: string
+  name: string
+  /** One of `TAG_COLORS`. Absent on rows saved before colors existed. */
+  color?: string
+  channelIds: string[]
+}
+
+/**
+ * The 32 colors a tag can wear: 15 hues in a light and a dark shade, plus two
+ * grays. Chip text flips between near-black and white by the shade's measured
+ * luminance (see `tagTextColor`), which is why both shades are usable.
+ */
+export const TAG_COLORS = [
+  '#dd5f5f', '#dd925f', '#ddc45f', '#c4dd5f', '#92dd5f', '#5fdd5f', '#5fdd92', '#5fddc4',
+  '#5fc4dd', '#5f92dd', '#5f5fdd', '#925fdd', '#c45fdd', '#dd5fc4', '#dd5f92', '#9a9aa7',
+  '#ab2b2b', '#ab5e2b', '#ab922b', '#92ab2b', '#5eab2b', '#2bab2b', '#2bab5e', '#2bab92',
+  '#2b92ab', '#2b5eab', '#2b2bab', '#5e2bab', '#922bab', '#ab2b92', '#ab2b5e', '#4a4a55',
+] as const
+
+/** What a tag saved before colors existed falls back to. */
+export const DEFAULT_TAG_COLOR: string = TAG_COLORS[15]
+
+/** The most tags one channel can carry. */
+export const MAX_TAGS_PER_CHANNEL = 10
+
+/** How multiple selected tags combine when filtering the feed. */
+export const TAG_MODES = ['or', 'and'] as const
+
+export type TagMode = (typeof TAG_MODES)[number]
+
+/**
  * `long`/`live` come from the split per-channel playlists. `short` is only ever
  * assigned by duration on the combined `UU` fallback path, which is the one way
  * a Short can enter the feed at all — see `PLAYLIST_KINDS` in `youtube.ts`.
@@ -84,6 +123,10 @@ export interface FeedRules {
   toDate: string
   query: string
   mutedChannels: string[]
+  /** Tag ids the feed is filtered to; empty means no tag filter. */
+  selectedTags: string[]
+  /** How multiple selected tags combine: any of them (`or`) or all (`and`). */
+  tagMode: TagMode
   channelSort: ChannelSortKey
   channelQuery: string
 }
@@ -94,6 +137,8 @@ export const DEFAULT_RULES: FeedRules = {
   toDate: '',
   query: '',
   mutedChannels: [],
+  selectedTags: [],
+  tagMode: 'or',
   channelSort: 'recent',
   channelQuery: '',
 }

@@ -4,6 +4,8 @@ import {
   type ChannelSortKey,
   type FeedRules,
   type SortKey,
+  type Tag,
+  type TagMode,
   type Video,
 } from './types'
 
@@ -110,11 +112,48 @@ function isoBound(day: string, nextDay: boolean): string {
 }
 
 /**
+ * The channels the selected tags admit, or `null` for "no tag filter". Videos
+ * carry no tag data of their own — they inherit their channel's tags — so the
+ * whole tag filter collapses to one Set membership check per video. Ids of
+ * tags since deleted are simply skipped; if every selected id is stale the
+ * filter is off, not "match nothing".
+ */
+export function tagFilterChannels(
+  tags: Tag[],
+  selectedIds: string[],
+  mode: TagMode,
+): Set<string> | null {
+  const selected = selectedIds
+    .map((id) => tags.find((t) => t.id === id))
+    .filter((t): t is Tag => t !== undefined)
+  if (selected.length === 0) return null
+  // OR is the union of the tags' channels; AND intersects them, seeded from the
+  // first tag's channels.
+  const allowed = new Set(selected[0].channelIds)
+  for (const tag of selected.slice(1)) {
+    if (mode === 'or') {
+      for (const id of tag.channelIds) allowed.add(id)
+    } else {
+      const own = new Set(tag.channelIds)
+      for (const id of allowed) if (!own.has(id)) allowed.delete(id)
+    }
+  }
+  return allowed
+}
+
+/**
  * Every filter runs before any sort: filtering is O(n) per rule while sorting
  * is O(n log n), so the sort must only ever see the survivors. `filter`
  * allocates the fresh array the in-place sort then works on.
+ *
+ * `tagChannels` is the precomputed result of `tagFilterChannels` (memoized by
+ * the caller — it depends on the tag rows, which this module never loads).
  */
-export function applyRules(videos: Video[], rules: FeedRules): Video[] {
+export function applyRules(
+  videos: Video[],
+  rules: FeedRules,
+  tagChannels: Set<string> | null = null,
+): Video[] {
   const muted = new Set(rules.mutedChannels)
   const needle = rules.query.trim().toLowerCase()
   const from = isoBound(rules.fromDate, false)
@@ -122,6 +161,7 @@ export function applyRules(videos: Video[], rules: FeedRules): Video[] {
 
   const filtered = videos.filter((v) => {
     if (muted.has(v.channelId)) return false
+    if (tagChannels && !tagChannels.has(v.channelId)) return false
     if (!inFeed(v)) return false
     if (from && v.publishedAt < from) return false
     if (to && v.publishedAt >= to) return false
