@@ -102,6 +102,8 @@ export default function App() {
   const readTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Duration of the last DB read, driving the adaptive throttle window.
   const lastReadMsRef = useRef(0)
+  // Whether this page load has started (or been spared) its automatic refresh.
+  const autoRefreshed = useRef(false)
 
   // Read one account's feed from the DB and paint it. This is the only path by
   // which feed data reaches the UI: the worker writes to the DB, never to state.
@@ -211,6 +213,9 @@ export default function App() {
   }, [project])
 
   const refresh = useCallback(async () => {
+    // Any refresh satisfies the auto-start-on-load below; without this, the
+    // sign-in click flipping `signedIn` would fire it and restart this run.
+    autoRefreshed.current = true
     setBusy(true)
     setError('')
     setFailed([])
@@ -229,6 +234,17 @@ export default function App() {
     }
     setSignedIn(true)
     setProgress('Loading subscriptions…')
+
+    // Paint the last account's cache right away instead of waiting for the
+    // worker to identify the account: signing in after the token expired left
+    // the screen empty until the run's first DB write. If the worker turns out
+    // to be a different account, its `user` message repoints and repaints.
+    const last = getLastUserId()
+    if (last && shownUserRef.current !== last) {
+      setUserId(last)
+      shownUserRef.current = last
+      void project(last)
+    }
 
     // Replace any worker still running from a previous refresh.
     workerRef.current?.terminate()
@@ -339,6 +355,17 @@ export default function App() {
 
     post({ kind: 'start' })
   }, [project, scheduleRead])
+
+  // Reloading the page with a still-valid session starts a refresh on its own —
+  // the reload is the "check for new videos" gesture. Only then: with the token
+  // expired the run would need an OAuth popup, which gets blocked outside a
+  // click (see above), so that case keeps the explicit sign-in button. The ref
+  // makes it once per page load, not once per sign-in state change.
+  useEffect(() => {
+    if (autoRefreshed.current || !signedIn) return
+    autoRefreshed.current = true
+    void refresh()
+  }, [signedIn, refresh])
 
   const channelsById = useMemo(() => new Map(channels.map((c) => [c.id, c])), [channels])
 
