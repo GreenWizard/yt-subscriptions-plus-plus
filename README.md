@@ -129,6 +129,76 @@ src/
 static host. Add the deployed origin to **Authorized JavaScript origins** under
 **Google Auth Platform → Clients → your client**, alongside the localhost entries.
 
+### GitHub Pages
+
+A project page is served from `https://<user>.github.io/<repo>/` — a subpath, not the origin
+root — so the build needs Vite's `--base` flag; everything else is the stock Pages/Actions flow.
+
+1. In the repository, open **Settings → Pages** and set **Source** to **GitHub Actions**.
+2. Commit this workflow as `.github/workflows/pages.yml`:
+
+   ```yaml
+   name: Deploy to GitHub Pages
+
+   on:
+     push:
+       branches: [main]
+     workflow_dispatch:
+
+   permissions:
+     contents: read
+     pages: write
+     id-token: write
+
+   concurrency:
+     group: pages
+     cancel-in-progress: true
+
+   jobs:
+     build:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+         - uses: actions/setup-node@v4
+           with:
+             node-version: 22
+             cache: npm
+         - run: npm ci
+         # --base makes asset URLs resolve under the /<repo>/ subpath.
+         - run: npm run build -- --base=/${{ github.event.repository.name }}/
+         - uses: actions/upload-pages-artifact@v3
+           with:
+             path: dist
+     deploy:
+       needs: build
+       runs-on: ubuntu-latest
+       environment:
+         name: github-pages
+         url: ${{ steps.deployment.outputs.page_url }}
+       steps:
+         - id: deployment
+           uses: actions/deploy-pages@v4
+   ```
+
+3. Push to `main`. The workflow builds `dist/` and publishes it; the URL appears on the
+   workflow run and under **Settings → Pages**.
+4. Add `https://<user>.github.io` to **Authorized JavaScript origins** on your OAuth client
+   (origins carry no path, so the bare `github.io` host of your account is the whole entry).
+   Also allow popups for that origin — sign-in still uses one.
+5. Open the page and paste your client ID into the setup screen, exactly as on localhost. The
+   ID is stored in your browser's `localStorage`, not in the repo. (Baking it in at build time
+   also works — define `VITE_GOOGLE_CLIENT_ID` as a repository **variable** and pass it in the
+   build step's `env` — but is only worth it if you are tired of the setup screen; a client ID
+   is public by design, though anyone who copies yours shares your daily quota.)
+
+Two things do not change from localhost: only Google accounts on the **Test users** list can
+sign in (see the note below), and the feed cache stays in each visitor's own browser — hosting
+the page publicly shares the code, not your data.
+
+To deploy without Actions, build locally and publish `dist/` to a `gh-pages` branch
+(`npx gh-pages -d dist` after building with the same `--base` flag), then point
+**Settings → Pages** at that branch — same result, just manual.
+
 ## Notes and limits
 
 - Access tokens live one hour and are held in `sessionStorage`. The browser-only OAuth flow issues
