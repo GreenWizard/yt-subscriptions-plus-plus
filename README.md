@@ -9,52 +9,50 @@ never leave your machine.
 
 ## What it does
 
-**Sorting**
+**One flat feed, your rules.** Every upload from every subscription lands in a single grid — no
+recommendations, no reordering by engagement, no Shorts (they are never fetched, so there is
+nothing to hide). What you *do* get to control:
 
-| Sort | What it means |
-| --- | --- |
-| Newest / Oldest first | Publish date. |
-| Most views | Absolute view count. |
-| Trending (views/hour) | Views divided by hours since publication — surfaces what is taking off right now instead of what is merely old and popular. |
+- **Sort** by publish date (newest or oldest first), absolute view count, or **trending** —
+  views per hour since publication, which surfaces what is taking off right now rather than what
+  is merely old and popular.
+- **Shuffle** re-deals the page on screen into a random order. It is a button, not a sort:
+  leaving the page or touching any rule un-shuffles.
+- **Filter** by an inclusive release-date window (with presets, in your timezone), by substring
+  search over titles and channel names, by your channel tags, or by muting channels outright — a
+  muted channel vanishes from the feed but stays in the channels view, where the mute is undone.
 
-**Shuffle page** re-deals the page on screen into a random order — it is a button, not a sort, so
-leaving the page or changing a rule un-shuffles.
+Every rule persists in `localStorage`; the feed opens exactly the way you left it.
 
-**Filtering**
+**Channel tags.** Label subscriptions with colored tags and filter the feed by them — pick any
+number, with a Match switch choosing between *any* (OR) and *all* (AND) when several are
+selected. Up to 10 tags per channel, each wearing one of 32 palette colors (chip text flips
+between dark and light by the color's measured luminance). Videos inherit their channel's tags,
+and the filter stays flat-cost at feed scale: selected tags collapse to one set of admitted
+channels, a single lookup per video even at 200k videos.
 
-- **Release date** — inclusive from/to window, with presets, in your own timezone.
-- **Search** — substring match on video title or channel name.
-- **Tags** — pick any number of your channel tags; a Match switch chooses between *any* (OR) and
-  *all* (AND) semantics when several are selected.
-- **Muting** — a muted channel disappears from the feed but stays in the channels view, where
-  muting is undone.
+Tags are created, renamed, recolored and deleted in the channels view — where they are assigned —
+and live in IndexedDB per account, surviving refreshes and cache clears. The manage panel exports
+them all to a JSON file and imports one back, which is how tags move to another browser or
+account. Import merges by name (case-insensitively) and is strictly additive: existing tags gain
+the file's channel assignments but keep their local color and casing, unknown names become new
+tags, nothing local is ever removed, and importing the same file twice is a no-op.
 
-Shorts are not a filter: they are never fetched, so there is nothing to toggle.
+**Channels view.** One row per subscription — its newest uploads, indexed count, and
+latest-upload age — searchable, sortable by recency or name, and the place where tags are
+assigned and channels muted.
 
-Rules persist in `localStorage`, so the feed opens the way you left it.
+**Refresh, on your terms.** Opening the page paints the cached feed instantly and, if your
+session is still valid, starts a refresh on its own — reloading the tab *is* the "check for new
+videos" gesture. Indexing runs in a Web Worker off the main thread, streams into the cache batch
+by batch, and is cancelable mid-run by pressing the button again: everything already indexed
+stays. The header counts the YouTube API quota units spent since the last reset, so you always
+know where the day's budget stands.
 
-**Channel tags**
-
-Label your subscriptions and filter the feed by those labels. Up to 10 tags per channel; every
-video inherits its channel's tags. Each tag wears one of 32 palette colors, with the chip text
-flipping between dark and light by the color's luminance. Tags are created, renamed, recolored and
-deleted in the **channels** view (where they are assigned), and live in IndexedDB next to the feed
-cache — per account, surviving refreshes and cache clears. Filtering stays flat-cost at feed
-scale: the selected tags collapse to one set of admitted channels, a single lookup per video even
-at 200k videos.
-
-**Channels view**
-
-One row per subscription — newest uploads, indexed count, latest-upload age — searchable and
-sortable by recency or name, with per-channel tag assignment and muting.
-
-**Mobile**
-
-The whole controls block slides away when scrolling down and returns on the first scroll up. The
-header never wraps: on narrow viewports the counters drop to their own row and the Refresh label
-becomes an icon. Rarely used actions (Clear cache, Sign out) sit in a ☰ menu in the corner. A
-running refresh can be cancelled by pressing the button again — everything already indexed stays
-cached.
+**Built for scale.** The grid is virtualized (only rows near the viewport are mounted) and the
+feed paginates, so a six-figure video cache scrolls smoothly on a phone. On narrow viewports the
+controls block slides away while scrolling down and returns on the first scroll up, counters drop
+to their own row, and rare actions (Clear cache, Sign out) tuck into a ☰ menu.
 
 ## Setup
 
