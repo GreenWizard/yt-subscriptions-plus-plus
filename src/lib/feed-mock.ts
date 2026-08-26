@@ -188,7 +188,11 @@ function installFixtures(arg?: string): void {
         }
       })
       const next = offset + PAGE < channelCount ? encodePageToken(offset + PAGE) : undefined
-      return jsonResponse({ items: slice, ...(next ? { nextPageToken: next } : {}) })
+      return jsonResponse({
+        items: slice,
+        pageInfo: { totalResults: channelCount },
+        ...(next ? { nextPageToken: next } : {}),
+      })
     }
 
     // playlistItems — the long-form playlist pages through the channel's videos;
@@ -203,17 +207,23 @@ function installFixtures(arg?: string): void {
       const chIdx = channelIndex('UC' + playlistId.slice(4))
       const count = isLivePl ? liveCount(chIdx) : longCount(chIdx)
       if (count === 0) return errorResponse(404, 'Playlist not found.', 'playlistNotFound')
-      const offset = Number(q.get('pageToken') ?? 0)
+      const rawToken = q.get('pageToken')
+      const offset = rawToken ? decodePageToken(rawToken) : 0
+      if (!Number.isFinite(offset)) return errorResponse(400, 'Invalid page token.', 'invalidPageToken')
       const prefix = isLivePl ? 'vl' : 'v'
       // Newest-first like the real auto-playlists: position 0 is the highest
       // sequence number, so raising a channel's count adds a NEW id at the head
       // (where a refresh's single-page scan will see it) instead of an old one
       // at the tail.
-      const slice = Array.from({ length: Math.min(PAGE, count - offset) }, (_, k) => ({
+      const slice = Array.from({ length: Math.max(0, Math.min(PAGE, count - offset)) }, (_, k) => ({
         contentDetails: { videoId: `${prefix}_${chIdx}_${count - 1 - (offset + k)}` },
       }))
-      const next = offset + PAGE < count ? String(offset + PAGE) : undefined
-      return jsonResponse({ items: slice, ...(next ? { nextPageToken: next } : {}) })
+      const next = offset + PAGE < count ? encodePageToken(offset + PAGE) : undefined
+      return jsonResponse({
+        items: slice,
+        pageInfo: { totalResults: count },
+        ...(next ? { nextPageToken: next } : {}),
+      })
     }
 
     // videos — details for a comma-separated id list.
