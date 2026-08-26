@@ -536,9 +536,9 @@ export default function App() {
         </header>
 
         {view === 'channels' ? (
-          <ChannelControls rules={rules} onChange={updateRules} />
+          <ChannelControls rules={rules} onChange={updateRules} tags={tags} tagActions={tagActions} />
         ) : (
-          <Controls rules={rules} onChange={updateRules} pager={pager} tags={tags} tagActions={tagActions} />
+          <Controls rules={rules} onChange={updateRules} pager={pager} tags={tags} />
         )}
       </div>
 

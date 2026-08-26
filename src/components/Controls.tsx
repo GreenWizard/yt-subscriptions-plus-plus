@@ -1,6 +1,7 @@
+import { useState } from 'react'
 import { CHANNEL_SORT_LABELS, SORT_LABELS } from '../lib/rules'
 import type { ChannelSortKey, FeedRules, SortKey, Tag } from '../lib/types'
-import { TagFilterRow, type TagActions } from './Tags'
+import { TagFilterRow, TagManager, type TagActions } from './Tags'
 
 /** Pagination of the filtered feed; rendered inside the sticky controls bar. */
 export interface Pager {
@@ -35,7 +36,7 @@ const DATE_PRESETS: { label: string; from: (now: Date) => Date }[] = [
   { label: 'This year', from: (n) => new Date(n.getFullYear(), 0, 1) },
 ]
 
-export function Controls({ rules, onChange, pager, tags, tagActions }: Props) {
+export function Controls({ rules, onChange, pager, tags }: Props) {
   return (
     <div className="controls">
       <div className="controls-row">
@@ -135,9 +136,7 @@ export function Controls({ rules, onChange, pager, tags, tagActions }: Props) {
         </button>
       </div>
 
-      {tags && tagActions && (
-        <TagFilterRow tags={tags} rules={rules} onChange={onChange} actions={tagActions} />
-      )}
+      {tags && <TagFilterRow tags={tags} rules={rules} onChange={onChange} />}
     </div>
   )
 }
@@ -146,8 +145,11 @@ export function Controls({ rules, onChange, pager, tags, tagActions }: Props) {
  * The channel list's own control bar. It shares the rules object and the muting
  * it writes, but not these two controls: the search matches channel names rather
  * than video titles, and the video sorts and date window have no meaning here.
+ * Tag management lives here too — tags are assigned per channel, so this view
+ * is where they are created and edited.
  */
-export function ChannelControls({ rules, onChange }: Props) {
+export function ChannelControls({ rules, onChange, tags, tagActions }: Props) {
+  const [managingTags, setManagingTags] = useState(false)
   return (
     <div className="controls">
       <div className="controls-row">
@@ -181,7 +183,15 @@ export function ChannelControls({ rules, onChange }: Props) {
         >
           Reset
         </button>
+
+        {tags && tagActions && (
+          <button className="chip" onClick={() => setManagingTags((m) => !m)}>
+            {managingTags ? 'Done' : 'Manage tags'}
+          </button>
+        )}
       </div>
+
+      {managingTags && tags && tagActions && <TagManager tags={tags} actions={tagActions} />}
     </div>
   )
 }

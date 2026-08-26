@@ -295,7 +295,8 @@ input:focus, select:focus, button:focus-visible {
   z-index: 5;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  /* Entries stretch to the menu's width, so every tag is a full-width row. */
+  align-items: stretch;
   gap: 7px;
   min-width: 190px;
   max-height: 320px;
@@ -306,6 +307,9 @@ input:focus, select:focus, button:focus-visible {
   border-radius: 10px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 }
+.tag-picker-menu .tag-chip { justify-content: flex-start; text-align: left; }
+.tag-picker-menu .control { display: flex; }
+.tag-picker-menu .control input { flex: 1; min-width: 0; }
 
 .tag-cap { font-size: 12px; color: var(--muted); }
 

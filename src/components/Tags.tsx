@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from 'react'
+import { useRef, useState, type CSSProperties, type SyntheticEvent } from 'react'
 import {
   DEFAULT_TAG_COLOR,
   MAX_TAGS_PER_CHANNEL,
@@ -43,22 +43,18 @@ function tagChipStyle(tag: Tag): CSSProperties {
 
 /**
  * The feed's tag filter row: one chip per tag (click to include it in the
- * filter), an AND/OR switch once two are selected, and a collapsible manage
- * panel for create/rename/delete. Tags are assigned to channels in the
- * channels view; this row only filters by them.
+ * filter) and an AND/OR switch once two are selected. This row only filters —
+ * tags are created, edited and assigned in the channels view.
  */
 export function TagFilterRow({
   tags,
   rules,
   onChange,
-  actions,
 }: {
   tags: Tag[]
   rules: FeedRules
   onChange: (patch: Partial<FeedRules>) => void
-  actions: TagActions
 }) {
-  const [managing, setManaging] = useState(false)
   const selected = new Set(rules.selectedTags)
 
   const toggle = (id: string) =>
@@ -69,9 +65,8 @@ export function TagFilterRow({
     })
 
   return (
-    <>
-      <div className="controls-row">
-        <span className="control">Tags</span>
+    <div className="controls-row">
+      <span className="control">Tags</span>
 
         {[...tags].sort(byName).map((tag) => (
           <button
@@ -81,9 +76,9 @@ export function TagFilterRow({
             onClick={() => toggle(tag.id)}
             title={`${tag.channelIds.length} channel${tag.channelIds.length === 1 ? '' : 's'}`}
           >
-            {!selected.has(tag.id) && (
-              <span className="tag-dot" style={{ background: tagColor(tag) }} />
-            )}
+            {/* Rendered when selected too — it melts into the identically
+                colored background — so toggling never changes the chip's size. */}
+            <span className="tag-dot" style={{ background: tagColor(tag) }} />
             {tag.name}
           </button>
         ))}
@@ -111,19 +106,16 @@ export function TagFilterRow({
             Clear
           </button>
         )}
-
-        <button className="chip" onClick={() => setManaging((m) => !m)}>
-          {managing ? 'Done' : 'Manage tags'}
-        </button>
-      </div>
-
-      {managing && <TagManager tags={tags} actions={actions} />}
-    </>
+    </div>
   )
 }
 
-/** Create / rename / delete. Renames commit on Enter or blur. */
-function TagManager({ tags, actions }: { tags: Tag[]; actions: TagActions }) {
+/**
+ * Create / rename / recolor / delete panel, rendered in the channels view's
+ * control bar — where tags are assigned, so where they are edited. Renames
+ * commit on Enter or blur.
+ */
+export function TagManager({ tags, actions }: { tags: Tag[]; actions: TagActions }) {
   return (
     <div className="controls-row tag-manager">
       <NewTagInput onCreate={(name) => actions.onCreate(name)} />
@@ -157,13 +149,26 @@ function TagManager({ tags, actions }: { tags: Tag[]; actions: TagActions }) {
 }
 
 /**
+ * Only one tag dropdown at a time: opening any `.tag-picker` (a channel's
+ * "+ tag" menu or a color palette) closes whichever other one is open. Native
+ * `<details>` has no cross-element exclusivity, so the open event enforces it.
+ */
+function closeOtherPickers(e: SyntheticEvent<HTMLDetailsElement>): void {
+  const opened = e.currentTarget
+  if (!opened.open) return
+  for (const other of document.querySelectorAll<HTMLDetailsElement>('details.tag-picker[open]')) {
+    if (other !== opened) other.removeAttribute('open')
+  }
+}
+
+/**
  * The tag's current color as a swatch button; clicking it drops down the whole
  * palette. Picking a swatch closes the `<details>` by hand — a plain click only
  * toggles it when it lands on the summary.
  */
 function ColorPicker({ tag, onPick }: { tag: Tag; onPick: (color: string) => void }) {
   return (
-    <details className="tag-picker">
+    <details className="tag-picker" onToggle={closeOtherPickers}>
       <summary
         className="tag-swatch"
         style={{ background: tagColor(tag) }}
@@ -228,6 +233,11 @@ export function ChannelTagPicker({
   const own = tags.filter((t) => t.channelIds.includes(channelId)).sort(byName)
   const atCap = own.length >= MAX_TAGS_PER_CHANNEL
 
+  // Adding a tag (or creating one) is the job the dropdown was opened for, so
+  // it closes itself then; removals keep it open for clearing several at once.
+  const menuRef = useRef<HTMLDetailsElement>(null)
+  const closeMenu = () => menuRef.current?.removeAttribute('open')
+
   return (
     <span className="channel-tags">
       {own.map((tag) => (
@@ -242,10 +252,19 @@ export function ChannelTagPicker({
         </button>
       ))}
 
-      <details className="tag-picker">
+      <details className="tag-picker" ref={menuRef} onToggle={closeOtherPickers}>
         <summary className="chip">+ tag</summary>
         <div className="tag-picker-menu">
-          {atCap && <span className="tag-cap">Limit of {MAX_TAGS_PER_CHANNEL} tags reached</span>}
+          {atCap ? (
+            <span className="tag-cap">Limit of {MAX_TAGS_PER_CHANNEL} tags reached</span>
+          ) : (
+            <NewTagInput
+              onCreate={(name) => {
+                actions.onCreate(name, channelId)
+                closeMenu()
+              }}
+            />
+          )}
           {[...tags].sort(byName).map((tag) => {
             const assigned = tag.channelIds.includes(channelId)
             return (
@@ -254,7 +273,10 @@ export function ChannelTagPicker({
                 className="chip tag-chip"
                 style={assigned ? tagChipStyle(tag) : undefined}
                 disabled={!assigned && atCap}
-                onClick={() => actions.onToggleChannel(tag.id, channelId)}
+                onClick={() => {
+                  actions.onToggleChannel(tag.id, channelId)
+                  if (!assigned) closeMenu()
+                }}
               >
                 {!assigned && <span className="tag-dot" style={{ background: tagColor(tag) }} />}
                 {assigned ? '✓ ' : ''}
@@ -262,7 +284,6 @@ export function ChannelTagPicker({
               </button>
             )
           })}
-          {!atCap && <NewTagInput onCreate={(name) => actions.onCreate(name, channelId)} />}
         </div>
       </details>
     </span>
