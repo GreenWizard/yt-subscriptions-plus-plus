@@ -88,7 +88,11 @@ input:focus, select:focus, button:focus-visible {
   top: 0;
   z-index: 10;
   background: var(--bg);
+  /* Slides away on scroll-down and back on scroll-up (see App's headHidden).
+     A transform keeps it in flow, so nothing below shifts when it hides. */
+  transition: transform 200ms ease;
 }
+.head.is-hidden { transform: translateY(-100%); }
 
 .topbar {
   display: flex;
@@ -101,6 +105,57 @@ input:focus, select:focus, button:focus-visible {
   background: var(--bg);
   border-bottom: 1px solid var(--border);
 }
+
+.topbar-stats { display: flex; align-items: center; gap: 14px; min-width: 0; }
+
+/* Refresh + menu, pinned to the right corner as one non-wrapping unit. */
+.topbar-actions { display: flex; align-items: center; gap: 10px; flex: none; margin-left: auto; }
+
+/* Wide layouts show the Refresh label; narrow ones swap it for the icon. */
+.refresh-icon { display: none; }
+@media (max-width: 800px) {
+  /* The stats drop to their own row under the header line, so the brand tabs
+     and the right-corner actions always share the first row un-wrapped. The
+     tighter paddings buy the ~30px that keeps them fitting a 375px phone. */
+  .topbar { padding: 12px 14px; gap: 10px 8px; }
+  /* The flex spacer forces the actions onto a second line here; the actions'
+     own auto left margin already pins them to the right corner without it. */
+  .topbar .spacer { display: none; }
+  .topbar-stats { flex-basis: 100%; order: 10; }
+  .refresh-label { display: none; }
+  .refresh-icon { display: inline-block; }
+}
+
+/* The ☰ menu holding the rarely used account actions (Clear cache, Sign out). */
+.menu { position: relative; }
+.menu > summary {
+  list-style: none;
+  cursor: pointer;
+  background: var(--surface-hi);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 11px;
+  line-height: 1.5;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.menu > summary::-webkit-details-marker { display: none; }
+.menu > summary:hover { background: #2a2a33; border-color: #3b3b47; }
+.menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 11;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 150px;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.menu-list button { white-space: nowrap; text-align: left; }
 
 .brand { display: flex; align-items: center; gap: 4px; }
 
@@ -231,6 +286,18 @@ input:focus, select:focus, button:focus-visible {
 /* Colored chips carry their tag's color as inline background/text styles; the
    hover rule would otherwise repaint them gray. */
 .tag-chip { display: inline-flex; align-items: center; gap: 6px; }
+
+/* The filter's chip strip and the manage panel scroll within a cap instead of
+   growing the sticky header: ~100 tags measured 1857px of controls on a phone,
+   pinning the header over the entire feed. */
+.tag-strip {
+  max-height: 116px; /* three chip rows */
+  overflow-y: auto;
+}
+.tag-manager {
+  max-height: 40vh;
+  overflow-y: auto;
+}
 .tag-chip[style]:hover:not(:disabled) { filter: brightness(1.12); }
 
 .tag-dot {

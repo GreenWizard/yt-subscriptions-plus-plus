@@ -42,8 +42,10 @@ function tagChipStyle(tag: Tag): CSSProperties {
 }
 
 /**
- * The feed's tag filter row: one chip per tag (click to include it in the
- * filter) and an AND/OR switch once two are selected. This row only filters —
+ * The feed's tag filter: a header row (label, AND/OR switch, Clear) above a
+ * chip strip that scrolls within a capped height, so a hundred tags cannot
+ * grow the sticky controls block past the viewport — with enough tags on a
+ * phone it measured 1857px tall and buried the whole feed. This only filters —
  * tags are created, edited and assigned in the channels view.
  */
 export function TagFilterRow({
@@ -65,23 +67,9 @@ export function TagFilterRow({
     })
 
   return (
-    <div className="controls-row">
-      <span className="control">Tags</span>
-
-        {[...tags].sort(byName).map((tag) => (
-          <button
-            key={tag.id}
-            className="chip tag-chip"
-            style={selected.has(tag.id) ? tagChipStyle(tag) : undefined}
-            onClick={() => toggle(tag.id)}
-            title={`${tag.channelIds.length} channel${tag.channelIds.length === 1 ? '' : 's'}`}
-          >
-            {/* Rendered when selected too — it melts into the identically
-                colored background — so toggling never changes the chip's size. */}
-            <span className="tag-dot" style={{ background: tagColor(tag) }} />
-            {tag.name}
-          </button>
-        ))}
+    <>
+      <div className="controls-row">
+        <span className="control">Tags</span>
 
         {tags.length === 0 && (
           <span className="control">No tags yet — create one and tag channels in the channels view.</span>
@@ -106,7 +94,27 @@ export function TagFilterRow({
             Clear
           </button>
         )}
-    </div>
+      </div>
+
+      {tags.length > 0 && (
+        <div className="controls-row tag-strip">
+          {[...tags].sort(byName).map((tag) => (
+            <button
+              key={tag.id}
+              className="chip tag-chip"
+              style={selected.has(tag.id) ? tagChipStyle(tag) : undefined}
+              onClick={() => toggle(tag.id)}
+              title={`${tag.channelIds.length} channel${tag.channelIds.length === 1 ? '' : 's'}`}
+            >
+              {/* Rendered when selected too — it melts into the identically
+                  colored background — so toggling never changes the chip's size. */}
+              <span className="tag-dot" style={{ background: tagColor(tag) }} />
+              {tag.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </>
   )
 }
 

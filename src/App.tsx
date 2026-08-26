@@ -161,6 +161,24 @@ export default function App() {
     }
   }, [userId])
 
+  // The sticky controls block slides away while scrolling down and returns on
+  // the first scroll up, so a phone's viewport is not half header. The small
+  // delta threshold ignores sub-pixel momentum jitter, and near the top the
+  // block is always shown — hiding there would just flicker.
+  const [headHidden, setHeadHidden] = useState(false)
+  useEffect(() => {
+    let lastY = window.scrollY
+    const onScroll = () => {
+      const y = window.scrollY
+      const dy = y - lastY
+      if (Math.abs(dy) < 8) return
+      lastY = y
+      setHeadHidden(dy > 0 && y > 120)
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
+
   useEffect(() => saveRules(rules), [rules])
 
   const updateRules = useCallback((patch: Partial<FeedRules>) => {
@@ -174,6 +192,21 @@ export default function App() {
     },
     [],
   )
+
+  // Pressing Refresh again mid-run cancels it: the worker is terminated where
+  // it stands. Everything it already wrote stays cached — the DB is written
+  // batch by batch, and pruning only ever runs after a completed run — so a
+  // cancelled refresh just means a partially updated feed.
+  const cancelRefresh = useCallback(() => {
+    workerRef.current?.terminate()
+    workerRef.current = null
+    if (readTimerRef.current) clearTimeout(readTimerRef.current)
+    readTimerRef.current = null
+    setBusy(false)
+    setProgress('')
+    // Settle the UI on whatever the interrupted run got into the DB.
+    if (shownUserRef.current) void project(shownUserRef.current)
+  }, [project])
 
   const refresh = useCallback(async () => {
     setBusy(true)
@@ -469,7 +502,7 @@ export default function App() {
 
   return (
     <>
-      <div className="head">
+      <div className={`head${headHidden ? ' is-hidden' : ''}`}>
         <header className="topbar">
         <nav className="brand">
           {VIEWS.map(({ id, label }) => (
@@ -485,49 +518,77 @@ export default function App() {
           ))}
         </nav>
         <div className="spacer" />
-        {apiUsed !== null && (
-          <span
-            className="control"
-            title="YouTube API units used since the last quota reset (midnight Pacific time). The default daily quota is 10,000."
-          >
-            {apiUsed.toLocaleString()} API
-          </span>
-        )}
-        {videos.length > 0 && (
-          <span className="control">
-            {view === 'channels'
-              ? `${rows.length} of ${channels.length} channels`
-              : `${visible.length} of ${videos.length} · ${channels.length} channels`}
+        {/* On narrow viewports this whole stats span drops to its own row below
+            the header (see the .topbar media query) so the action buttons on
+            the right never wrap. */}
+        {(apiUsed !== null || videos.length > 0) && (
+          <span className="topbar-stats">
+            {apiUsed !== null && (
+              <span
+                className="control"
+                title="YouTube API units used since the last quota reset (midnight Pacific time). The default daily quota is 10,000."
+              >
+                {apiUsed.toLocaleString()} API
+              </span>
+            )}
+            {videos.length > 0 && (
+              <span className="control">
+                {view === 'channels'
+                  ? `${rows.length} of ${channels.length} channels`
+                  : `${visible.length} of ${videos.length} · ${channels.length} channels`}
+              </span>
+            )}
           </span>
         )}
         {signedIn ? (
-          <>
-            <button className="primary" onClick={() => void refresh()} disabled={busy}>
-              {busy ? 'Refreshing…' : 'Refresh'}
-            </button>
-            {userId && videos.length > 0 && (
-              <button onClick={() => setConfirmingClear(true)} disabled={busy}>
-                Clear cache
-              </button>
-            )}
+          <span className="topbar-actions">
             <button
-              onClick={() => {
-                signOut()
-                setSignedIn(false)
-                // Hide the feed, but keep the cache: signing back in restores it.
-                // Clearing the shown-account marker is what makes that restore
-                // happen — the next refresh sees the account as not-yet-painted.
-                shownUserRef.current = null
-                setChannels([])
-                setVideos([])
-                setFailed([])
-                setError('')
-              }}
-              disabled={busy}
+              className="primary refresh"
+              onClick={() => (busy ? cancelRefresh() : void refresh())}
+              title={busy ? 'Cancel the refresh (what is already indexed is kept)' : 'Refresh the feed'}
             >
-              Sign out
+              <span className="refresh-label">{busy ? 'Cancel' : 'Refresh'}</span>
+              <span className="refresh-icon" aria-hidden>
+                {busy ? '✕' : '↻'}
+              </span>
             </button>
-          </>
+            <details className="menu">
+              <summary aria-label="Menu" title="Menu">
+                ☰
+              </summary>
+              <div className="menu-list">
+                {userId && videos.length > 0 && (
+                  <button
+                    disabled={busy}
+                    onClick={(e) => {
+                      e.currentTarget.closest('details')?.removeAttribute('open')
+                      setConfirmingClear(true)
+                    }}
+                  >
+                    Clear cache
+                  </button>
+                )}
+                <button
+                  disabled={busy}
+                  onClick={(e) => {
+                    e.currentTarget.closest('details')?.removeAttribute('open')
+                    signOut()
+                    setSignedIn(false)
+                    // Hide the feed, but keep the cache: signing back in restores it.
+                    // Clearing the shown-account marker is what makes that restore
+                    // happen — the next refresh sees the account as not-yet-painted.
+                    shownUserRef.current = null
+                    setChannels([])
+                    setVideos([])
+                    setFailed([])
+                    setError('')
+                  }}
+                >
+                  Sign out
+                </button>
+              </div>
+            </details>
+          </span>
         ) : (
           <button className="primary" onClick={() => void refresh()} disabled={busy}>
             Sign in with Google
